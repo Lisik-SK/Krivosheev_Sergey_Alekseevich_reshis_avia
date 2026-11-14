@@ -50,11 +50,20 @@ export interface Meta {
   data: DataInfo;
 }
 
-export type ForecastResponse = ForecastResult & { dataVersion: number };
+/**
+ * Метка снимка, использованного для расчёта. Номер растёт в пределах процесса,
+ * а дата загрузки различает перезапуски. В сохранённых ранее ответах дата может отсутствовать.
+ */
+export interface ResponseVersion {
+  dataVersion: number;
+  dataLoadedAt?: string;
+}
+
+/** Ответ прогноза с меткой снимка, использованного для вычислений. */
+export type ForecastResponse = ForecastResult & ResponseVersion;
 
 /** Ответ кривой цены с версией данных, использованной для вычислений. */
-export interface CurveResponse {
-  dataVersion: number;
+export interface CurveResponse extends ResponseVersion {
   route: string;
   date: string;
   seats: number;
@@ -67,8 +76,7 @@ export interface CurveResponse {
 }
 
 /** Ответ календаря загрузки с версией данных, использованной для вычислений. */
-export interface MonthResponse {
-  dataVersion: number;
+export interface MonthResponse extends ResponseVersion {
   route: string;
   price: number;
   days: DaySummary[];
@@ -89,7 +97,8 @@ export interface BoardFlight {
   revenue: number;
 }
 
-export interface BoardResponse {
+/** Результат табло за выбранную дату с меткой снимка, использованного для вычислений. */
+export interface BoardResponse extends ResponseVersion {
   date: string | null;
   priceMode: 'base' | 'model';
   dates: string[];
@@ -110,14 +119,17 @@ export interface HistoryItem {
   createdAt: string;
 }
 
+/** Ответ проверки или применения CSV; при успешной проверке содержит ревизию для подтверждения. */
 export interface UploadResponse {
   ok: boolean;
   applied: boolean;
   error?: string;
+  revision?: string;
   summary?: { flights: number; routes: string[]; dateFrom: string | null; dateTo: string | null; quantileLevels: number[] };
   diff?: {
     addedRoutes: string[];
     removedRoutes: string[];
+    changedRoutes?: string[];
     changedFlights: number;
     removedFlights: number;
     perRoute: Array<{ route: string; before: number | null; after: number | null; deltaPct: number | null }>;
@@ -125,9 +137,11 @@ export interface UploadResponse {
   warnings?: string[];
 }
 
+/** Сведения о CSV, наличии резервов и идентификаторах текущих состояний для отката. */
 export interface AdminData {
   data: DataInfo;
   backups: { forecast: boolean; routes: boolean };
+  revisions: { forecast: string; routes: string };
   uploadMaxMb: number;
 }
 
@@ -198,7 +212,18 @@ export const api = {
   deleteHistory: (id: number) => request<{ items: HistoryItem[] }>('DELETE', `/api/history/${id}`, {}),
   clearHistory: (mode: 'all' | 'unpinned') => request<{ items: HistoryItem[] }>('DELETE', `/api/history?mode=${mode}`, {}),
   adminData: () => request<AdminData>('GET', '/api/admin/data'),
-  upload: (kind: 'forecast' | 'routes', filename: string, content: string, apply: boolean) =>
-    request<UploadResponse>('POST', '/api/admin/upload', { kind, filename, content, apply }),
-  restore: (kind: 'forecast' | 'routes') => request<{ ok: true }>('POST', '/api/admin/restore', { kind }),
+  /**
+   * Проверяет CSV или применяет проверенный файл. Тип файла, имя и непустое содержимое
+   * обязательны; apply включает запись, для которой обязательна ревизия из ответа проверки.
+   * Возвращает ответ сервера; сетевые сбои, ошибки HTTP и конфликт ревизий отклоняют Promise.
+   */
+  upload: (kind: 'forecast' | 'routes', filename: string, content: string, apply: boolean, expectedRevision?: string) =>
+    request<UploadResponse>('POST', '/api/admin/upload', { kind, filename, content, apply, expectedRevision }),
+  /**
+   * Запрашивает откат CSV указанного типа для обязательной ревизии из сведений о резерве.
+   * При успехе сервер меняет активные данные и возвращает подтверждение. Ошибки запроса
+   * и несовпадение ревизии отклоняют Promise; автоматических повторов нет.
+   */
+  restore: (kind: 'forecast' | 'routes', expectedRevision: string) =>
+    request<{ ok: true }>('POST', '/api/admin/restore', { kind, expectedRevision }),
 };

@@ -7,6 +7,7 @@ import path from 'node:path';
 import { request, type APIRequestContext, type Page, type TestInfo } from '@playwright/test';
 import { expect } from '../../e2e/support/fixtures';
 import { ADMIN } from '../../e2e/support/admin-user';
+export { uploadDataset as uploadApply } from '../../e2e/support/admin-data';
 
 export const BASE_URL = `http://127.0.0.1:${process.env.E2E_PORT ?? 3399}`;
 /** Папка с данными, из которой читает тестовый сервер (копия data/, см. prepare-server.mjs). */
@@ -31,16 +32,6 @@ export async function adminApi(): Promise<APIRequestContext> {
   const res = await api.post('/api/auth/login', { data: { email: ADMIN.email, password: ADMIN.password } });
   expect(res.status(), await res.text()).toBe(200);
   return api;
-}
-
-export async function uploadApply(api: APIRequestContext, kind: 'forecast' | 'routes', content: string) {
-  const res = await api.post('/api/admin/upload', {
-    data: { kind, filename: kind === 'forecast' ? 'seasonal_forecast.csv' : 'routes.csv', content, apply: true },
-  });
-  expect(res.ok(), await res.text()).toBe(true);
-  const body = (await res.json()) as { ok: boolean; applied: boolean; error?: string };
-  expect(body.ok, body.error).toBe(true);
-  expect(body.applied).toBe(true);
 }
 
 /** Медианный спрос по API, чтобы понять, какие данные сейчас у сервера. */

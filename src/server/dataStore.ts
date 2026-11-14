@@ -1,20 +1,21 @@
 /**
  * Хранилище прогноза в памяти с «горячей» заменой файлов.
  *
- * При запросах (не чаще checkIntervalMs) сервер сверяет время изменения и размер
+ * При запросах (не чаще checkIntervalMs) сервер сверяет статистику
  * CSV-файлов. Если файл заменили, данные перечитываются без перезапуска. Если новый
  * файл с ошибкой, продолжаем работать на последней корректной версии и показываем
  * ошибку в /api/health и в интерфейсе.
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { csvFilename, dataFileName, dataFileVersionKey, downloadDataFile, readDataFile, readDataFileIfPresent, repairPortableName, writeDataFile } from './data-file.js';
-import { finishBackup, stageBackup } from './data-file-backup.js';
+import { csvFilename, dataFileName, decodeDataFile, downloadDataFile, readDataFile, readDataFileIfPresent, repairPortableName, writeDataFile } from './data-file.js';
+import { finishBackup, InvalidBackupPreparationError, stageBackup } from './data-file-backup.js';
+import { fileRevision } from './data-revision.js';
 import { parseForecastCsv, parseRoutesCsv, type FlightForecast, type RouteInfo } from '../shared/dataset.js';
 import { LocalizedError, render, type Lang, type Localizable } from '../shared/messages.js';
 
 /** Выбирает CSV прогноза или справочника маршрутов. */
-type DataKind = 'forecast' | 'routes';
+export type DataKind = 'forecast' | 'routes';
 
 export interface DatasetSnapshot {
   routes: RouteInfo[];
@@ -53,16 +54,6 @@ export function toLoadError(err: unknown): LoadError {
   return { text: () => message };
 }
 
-/** Читает идентификатор версии по пути к CSV. Возвращает строку или 'missing' при ошибке stat. Диск не меняет. */
-function signature(file: string): string {
-  try {
-    const st = fs.statSync(file, { bigint: true });
-    return dataFileVersionKey(st);
-  } catch {
-    return 'missing';
-  }
-}
-
 /**
  * Собирает метаданные одной открытой версии CSV.
  * @param file Обязательный путь для поиска имени и выбора стандартного имени.
@@ -82,8 +73,8 @@ function fileInfo(file: string, { stat, content }: ReturnType<typeof readDataFil
  * @remarks Ошибки разбора распространяются. Не меняет файлы и состояние хранилища.
  */
 export function validateDataFile(kind: DataKind, content: Buffer): void {
-  if (kind === 'forecast') parseForecastCsv(content.toString('utf8'));
-  else parseRoutesCsv(content.toString('utf8'));
+  if (kind === 'forecast') parseForecastCsv(decodeDataFile(content, 'what_forecast'));
+  else parseRoutesCsv(decodeDataFile(content, 'what_routes'));
 }
 
 /**
@@ -159,6 +150,10 @@ export function buildSnapshot(
   };
 }
 
+/**
+ * Хранит последний исправный снимок пары CSV и управляет публикацией отдельных файлов.
+ * Состояние принадлежит одному процессу записи. Ошибка чтения или разбора не вытесняет рабочий снимок.
+ */
 export class DataStore {
   private snapshot: DatasetSnapshot | null = null;
   private lastError: LoadError | null = null;
@@ -166,6 +161,14 @@ export class DataStore {
   private lastCheck = 0;
   private version = 0;
 
+  /**
+   * Считывает начальный снимок и настраивает последующие проверки изменений файлов.
+   * @param forecastPath Обязательный путь к CSV прогноза.
+   * @param routesPath Обязательный путь к CSV справочника.
+   * @param checkIntervalMs Минимальный интервал проверки, неотрицательные миллисекунды, по умолчанию 2000.
+   * @param log Необязательная функция журнала; получает текст и уровень, по умолчанию ничего не делает.
+   * @remarks Синхронно читает оба файла и пишет в журнал. Ошибка данных сохраняется в status().
+   */
   constructor(
     readonly forecastPath: string,
     readonly routesPath: string,
@@ -180,7 +183,7 @@ export class DataStore {
     const now = Date.now();
     if (!force && now - this.lastCheck < this.checkIntervalMs) return;
     this.lastCheck = now;
-    const sig = signature(this.forecastPath) + '|' + signature(this.routesPath);
+    const sig = this.currentRevision();
     if (sig !== this.lastSignature) this.reload(sig);
   }
 
@@ -194,16 +197,38 @@ export class DataStore {
     return this.snapshot;
   }
 
-  /** Текущие тексты файлов; отсутствующий или нечитаемый файл — пустая строка. */
-  readCurrentTexts(): { forecast: string; routes: string } {
-    const safe = (file: string) => {
-      try {
-        return fs.readFileSync(file, 'utf8');
-      } catch {
-        return '';
-      }
-    };
-    return { forecast: safe(this.forecastPath), routes: safe(this.routesPath) };
+  /**
+   * Возвращает метку состояний обоих текущих CSV для перечитывания и подтверждения операций.
+   * @returns Строка из двух отметок статистики. Ошибка доступа учитывается как отдельное состояние.
+   * @remarks Синхронно проверяет диск без чтения содержимого, записей или изменения снимка.
+   */
+  currentRevision(): string {
+    return `${fileRevision(this.forecastPath)}|${fileRevision(this.routesPath)}`;
+  }
+
+  /**
+   * Читает текущий CSV, который должен остаться на месте при замене второго файла.
+   * @param kind Обязательный тип читаемого файла: forecast или routes.
+   * @returns Строго декодированный текст UTF-8.
+   * @throws LocalizedError При отсутствии файла, ошибке чтения либо неверной кодировке.
+   * @remarks Синхронно читает диск, не меняет файлы и состояние снимка.
+   */
+  readCurrentText(kind: DataKind): string {
+    const what = kind === 'forecast' ? 'what_forecast' : 'what_routes';
+    const file = kind === 'forecast' ? this.forecastPath : this.routesPath;
+    return decodeDataFile(readSource(file, what).content, what);
+  }
+
+  /**
+   * Проверяет, можно ли восстановить недостающий или нечитаемый CSV отдельно от второго файла.
+   * @param kind Обязательный тип проверяемого CSV: forecast или routes.
+   * @returns true, если текущий файл существует, декодируется и разбирается.
+   * @remarks Синхронно читает диск без записей; ошибки ввода-вывода, кроме ENOENT, распространяются.
+   */
+  hasValidCurrentFile(kind: DataKind): boolean {
+    const file = kind === 'forecast' ? this.forecastPath : this.routesPath;
+    const current = readDataFileIfPresent(file);
+    return current !== undefined && canBackUp(kind, current.content);
   }
 
   fileInfoOrEmpty(kind: 'forecast' | 'routes'): FileInfo {
@@ -269,34 +294,57 @@ export class DataStore {
    * Заменяет текущий CSV и сохраняет предыдущие байты и имя в резервной копии.
    * @param kind Обязательный тип CSV: прогноз или справочник.
    * @param content Обязательные байты предварительно проверенного CSV.
-   * @param filename Необязательное исходное имя, при отсутствии берётся настроенное имя.
+   * @param filename Исходное имя или undefined для настроенного имени.
+   * @param expectedCurrent Необязательная метка обоих активных файлов; сверяется непосредственно перед переименованием.
+   * @param allowBackupRepair Разрешить восстановить повреждённую подготовку резерва при новой загрузке; по умолчанию false.
    * @returns void после публикации, перечитывания данных и попытки завершить резерв либо при точном повторе.
    * @remarks Завершает незакрытую операцию, затем читает текущий CSV. При одинаковом имени и байтах
    * новой записи нет. При замене исправной версии готовит резерв, публикует текущий CSV и завершает резерв;
    * для отсутствующего или повреждённого CSV сохраняет прежний резерв. При ошибке до публикации
-   * прежний резерв остаётся; при ошибке после публикации запись резерва будет повторена при следующем
+   * прежний резерв остаётся. При подтверждённой загрузке с исправным текущим CSV новая операция
+   * может заменить доказанно повреждённую подготовку; временные ошибки ввода-вывода распространяются.
+   * При ошибке после публикации запись резерва будет повторена при следующем
    * обращении к нему или замене. Ошибки до публикации распространяются. Ошибка завершения после
    * публикации журналируется: операция применения уже состоялась. reload отражает ошибки загрузки набора.
    */
-  replaceFile(kind: DataKind, content: Buffer, filename?: string): void {
+  replaceFile(kind: DataKind, content: Buffer, filename?: string, expectedCurrent?: string, allowBackupRepair = false): void {
     const target = kind === 'forecast' ? this.forecastPath : this.routesPath;
     const fallback = path.basename(target);
     fs.mkdirSync(path.dirname(target), { recursive: true });
-    finishBackup(target);
     const name = csvFilename(filename, fallback);
     const previous = readDataFileIfPresent(target);
-    let prepareBackup: ((key: string) => void) | undefined;
-    if (previous) {
-      const previousName = dataFileName(target, previous.stat, previous.content, fallback);
-      if (previousName === name && previous.content.equals(content)) return;
-      if (canBackUp(kind, previous.content)) {
-        /** Готовит резерв из текущей версии по обязательному ключу публикации; ошибки диска распространяются. */
-        prepareBackup = (key) => stageBackup(target, key, { content: previous.content, name: previousName });
-      }
+    const previousName = previous ? dataFileName(target, previous.stat, previous.content, fallback) : fallback;
+    const unchanged = previousName === name && previous?.content.equals(content);
+    const backup = previous && !unchanged && canBackUp(kind, previous.content) ? { content: previous.content, name: previousName } : null;
+    let repairBackup = false;
+    try {
+      finishBackup(target);
+    } catch (error) {
+      if (!(error instanceof InvalidBackupPreparationError) || !allowBackupRepair || !backup) throw error;
+      repairBackup = true;
     }
-    writeDataFile(target, content, name, fallback, prepareBackup);
+    if (unchanged) {
+      this.checkExpectedRevision(expectedCurrent);
+      return;
+    }
+    /** По ключу новой версии готовит резерв и проверяет активные файлы; ошибки прерывают публикацию. */
+    const beforePublish = (key: string) => {
+      if (backup) stageBackup(target, key, backup, repairBackup);
+      this.checkExpectedRevision(expectedCurrent);
+    };
+    writeDataFile(target, content, name, fallback, beforePublish);
     this.reload();
     this.tryFinishBackup(target);
+  }
+
+  /**
+   * Проверяет, что оба активных CSV остались в ожидаемом состоянии.
+   * @param expected Метка файлов или undefined, чтобы пропустить проверку.
+   * @returns Ничего. При расхождении выбрасывает LocalizedError.
+   * @remarks Синхронно считывает статистику диска, не меняет файлы.
+   */
+  private checkExpectedRevision(expected: string | undefined): void {
+    if (expected !== undefined && expected !== this.currentRevision()) throw new LocalizedError('data_revision_conflict');
   }
 
   /**
@@ -322,15 +370,16 @@ export class DataStore {
    * @remarks Синхронно читает файлы, разбирает данные и пишет в журнал; ошибки чтения и разбора не выбрасывает.
    */
   reload(sig?: string): void {
-    this.lastSignature = sig ?? signature(this.forecastPath) + '|' + signature(this.routesPath);
+    this.lastSignature = sig ?? this.currentRevision();
     this.lastCheck = Date.now();
     try {
       const routes = readSource(this.routesPath, 'what_routes');
       const forecast = readSource(this.forecastPath, 'what_forecast');
-      const snapshot = buildSnapshot(routes.content.toString('utf8'), forecast.content.toString('utf8'), {
+      const snapshot = buildSnapshot(decodeDataFile(routes.content, 'what_routes'), decodeDataFile(forecast.content, 'what_forecast'), {
         version: this.version + 1,
         source: { forecast: fileInfo(this.forecastPath, forecast), routes: fileInfo(this.routesPath, routes) },
       });
+      if (this.currentRevision() !== this.lastSignature) throw new LocalizedError('files_changed_while_reading');
       this.version++;
       this.snapshot = snapshot;
       this.lastError = null;
@@ -341,7 +390,9 @@ export class DataStore {
     } catch (err) {
       // Если файл не удалось прочитать (например, его держит Excel или антивирус),
       // подпись не запоминаем: при следующей проверке попробуем снова.
-      if (err instanceof LocalizedError && err.key === 'file_read_error') this.lastSignature = '';
+      if (err instanceof LocalizedError && (err.key === 'file_read_error' || err.key === 'files_changed_while_reading')) {
+        this.lastSignature = '';
+      }
       this.lastError = toLoadError(err);
       const text = this.lastError.text('ru');
       this.log(

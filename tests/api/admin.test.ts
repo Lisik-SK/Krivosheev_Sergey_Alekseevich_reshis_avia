@@ -13,6 +13,50 @@ const AER_0601 = 'MOW-AER,2026-06-01,900,656,8928,667,694,9061,685,723,9163,700,
 const CHANGED_FORECAST = ORIGINAL_FORECAST.replace(AER_0601, AER_0601.replace(',742,9233,710,775,', ',742,9233,710,780,'));
 const AER = { from: 'MOW', to: 'AER', date: '2026-06-01', price: 9500 };
 
+/**
+ * Запускает подготовку CSV и, если запрошено apply: true, применяет тот же файл с полученной ревизией.
+ * @param app Обязательный запущенный тестовый сервер.
+ * @param token Обязательная сессия администратора.
+ * @param payload Обязательное тело запроса, включая тип, текст и необязательное имя файла.
+ * @param headers Необязательные заголовки, по умолчанию пустые.
+ * @returns Ответ проверки или применения; при отказе проверки записей не происходит.
+ * @remarks Использует внутренний HTTP-интерфейс Fastify и меняет только данные тестового экземпляра.
+ */
+async function sendUpload(app: FastifyInstance, token: string, payload: Record<string, unknown>, headers = {}) {
+  const { apply = false, ...candidate } = payload;
+  const preview = await api(app, 'POST', '/api/admin/upload', token, candidate, headers);
+  const revision: unknown = preview.json().revision;
+  if (!apply || preview.statusCode !== 200 || typeof revision !== 'string') return preview;
+  return api(app, 'POST', '/api/admin/upload', token, { ...candidate, apply, expectedRevision: revision }, headers);
+}
+
+/**
+ * Считывает ревизию отката для имитации отображённой карточки файла.
+ * @param app Обязательный запущенный тестовый сервер.
+ * @param token Обязательная сессия администратора.
+ * @param kind Обязательный тип CSV.
+ * @returns Ревизия отката; неожиданная форма ответа приводит к сбою теста.
+ * @remarks Читает метаданные через Fastify; хранилище может закончить восстановление резерва.
+ */
+async function getRestoreRevision(app: FastifyInstance, token: string, kind: 'forecast' | 'routes'): Promise<string> {
+  const info = await api(app, 'GET', '/api/admin/data', token);
+  const revision = info.json().revisions[kind];
+  expect(revision).toMatch(/^[0-9a-f]{64}$/);
+  return revision;
+}
+
+/**
+ * Выполняет один откат с ревизией из актуальной карточки файла.
+ * @param app Обязательный запущенный тестовый сервер.
+ * @param token Обязательная сессия администратора.
+ * @param payload Тип: forecast или routes; другое значение передаётся для проверки отказа.
+ * @returns HTTP-ответ отката, включая код отказа. Меняет лишь тестовые данные при успехе.
+ */
+async function sendRestore(app: FastifyInstance, token: string, { kind }: { kind: string }) {
+  const expectedRevision = kind === 'forecast' || kind === 'routes' ? await getRestoreRevision(app, token, kind) : undefined;
+  return api(app, 'POST', '/api/admin/restore', token, { kind, expectedRevision });
+}
+
 const tempDirs: string[] = [];
 const apps: FastifyInstance[] = [];
 afterAll(async () => {
@@ -107,7 +151,7 @@ describe('GET /api/admin/download/:kind', () => {
     fs.renameSync(files.forecastPath, forecastPath);
     const { app, adminToken } = await adminApp({}, { ...files, forecastPath });
     const replacement = `\uFEFF${CHANGED_FORECAST.replace(/\r?\n/g, '\r\n')}`;
-    const upload = await api(app, 'POST', '/api/admin/upload', adminToken, { kind: 'forecast', content: replacement, apply: true });
+    const upload = await sendUpload(app, adminToken, { kind: 'forecast', content: replacement, apply: true });
     expect(upload.json()).toMatchObject({ ok: true, applied: true });
 
     const res = await api(app, 'GET', '/api/admin/download/forecast', adminToken);
@@ -125,7 +169,7 @@ describe('GET /api/admin/download/:kind', () => {
     const files = setupDir();
     const firstApp = await adminApp({}, files);
     for (const filename of [firstName, secondName]) {
-      const upload = await api(firstApp.app, 'POST', '/api/admin/upload', firstApp.adminToken, { kind, filename, content, apply: true });
+      const upload = await sendUpload(firstApp.app, firstApp.adminToken, { kind, filename, content, apply: true });
       expect(upload.statusCode).toBe(200);
       expect(upload.json()).toMatchObject({ ok: true, applied: true, data: { source: { [kind]: { name: filename } } } });
     }
@@ -155,7 +199,7 @@ describe('GET /api/admin/download/:kind', () => {
 
     for (const filename of [secondName, firstName]) {
       if (filename === firstName) {
-        const restore = await api(app, 'POST', '/api/admin/restore', adminToken, { kind });
+        const restore = await sendRestore(app, adminToken, { kind });
         expect(restore.statusCode).toBe(200);
         expect(restore.json()).toMatchObject({ ok: true, data: { source: { [kind]: { name: filename } } } });
       }
@@ -170,7 +214,7 @@ describe('GET /api/admin/download/:kind', () => {
   it('сохраняет имя и содержимое резервной версии при сбое публикации CSV', async () => {
     const { app, adminToken, forecastPath } = await adminApp();
     /** Отправляет обязательные имя и текст CSV прогноза на тестовый сервер, возвращает ответ применения или ошибку запроса. */
-    const upload = (filename: string, content: string) => api(app, 'POST', '/api/admin/upload', adminToken, {
+    const upload = (filename: string, content: string) => sendUpload(app, adminToken, {
       kind: 'forecast', filename, content, apply: true,
     });
     expect((await upload('previous.csv', ORIGINAL_FORECAST)).statusCode).toBe(200);
@@ -190,7 +234,7 @@ describe('GET /api/admin/download/:kind', () => {
     expect(current.headers['content-disposition']).toContain('filename="current.csv"');
     expect(current.rawPayload).toEqual(Buffer.from(CHANGED_FORECAST));
 
-    const restored = await api(app, 'POST', '/api/admin/restore', adminToken, { kind: 'forecast' });
+    const restored = await sendRestore(app, adminToken, { kind: 'forecast' });
     expect(restored.json().data.source.forecast.name).toBe('previous.csv');
     const previous = await api(app, 'GET', '/api/admin/download/forecast', adminToken);
     expect(previous.headers['content-disposition']).toContain('filename="previous.csv"');
@@ -203,11 +247,11 @@ describe('GET /api/admin/download/:kind', () => {
   ] as const)('повторный запрос не затирает резерв (%s)', async (kind, fileKey, previous, current) => {
     const { app, adminToken, [fileKey]: file } = await adminApp();
     for (const [filename, content] of [['previous.csv', previous], ['current.csv', current], ['current.csv', current]]) {
-      const res = await api(app, 'POST', '/api/admin/upload', adminToken, { kind, filename, content, apply: true });
+      const res = await sendUpload(app, adminToken, { kind, filename, content, apply: true });
       expect(res.json()).toMatchObject({ ok: true, applied: true });
     }
     expect(fs.readFileSync(`${file}.bak`, 'utf8')).toBe(previous);
-    const restored = await api(app, 'POST', '/api/admin/restore', adminToken, { kind });
+    const restored = await sendRestore(app, adminToken, { kind });
     expect(restored.json()).toMatchObject({ ok: true, data: { source: { [kind]: { name: 'previous.csv' } } } });
     expect(fs.readFileSync(file, 'utf8')).toBe(previous);
     expect(fs.readFileSync(`${file}.bak`, 'utf8')).toBe(current);
@@ -222,7 +266,7 @@ describe('GET /api/admin/download/:kind', () => {
       rename(from, to);
     });
     try {
-      const res = await api(firstApp.app, 'POST', '/api/admin/upload', firstApp.adminToken, {
+      const res = await sendUpload(firstApp.app, firstApp.adminToken, {
         kind: 'forecast', filename: 'current.csv', content: CHANGED_FORECAST, apply: true,
       });
       expect(res.json()).toMatchObject({ ok: true, applied: true });
@@ -236,7 +280,7 @@ describe('GET /api/admin/download/:kind', () => {
     const { app, adminToken } = await adminApp({}, files);
     const status = await api(app, 'GET', '/api/admin/data', adminToken);
     expect(status.json()).toMatchObject({ backups: { forecast: true }, data: { source: { forecast: { name: 'current.csv' } } } });
-    const restored = await api(app, 'POST', '/api/admin/restore', adminToken, { kind: 'forecast' });
+    const restored = await sendRestore(app, adminToken, { kind: 'forecast' });
     expect(restored.json()).toMatchObject({ ok: true, data: { source: { forecast: { name: 'seasonal_forecast.csv' } } } });
     expect(fs.readFileSync(files.forecastPath, 'utf8')).toBe(ORIGINAL_FORECAST);
   });
@@ -256,8 +300,8 @@ describe('GET /api/admin/download/:kind', () => {
 
 describe('POST /api/admin/upload', () => {
   let ctx: Awaited<ReturnType<typeof adminApp>>;
-  const upload = (payload: unknown, headers: Record<string, string> = {}) =>
-    api(ctx.app, 'POST', '/api/admin/upload', ctx.adminToken, payload, headers);
+  const upload = (payload: Record<string, unknown>, headers: Record<string, string> = {}) =>
+    sendUpload(ctx.app, ctx.adminToken, payload, headers);
   beforeAll(async () => {
     ctx = await adminApp({ uploadMaxMb: 1 });
   });
@@ -271,7 +315,7 @@ describe('POST /api/admin/upload', () => {
     const empty = await upload({ kind: 'forecast', content: '  \n ' });
     expect(empty.statusCode).toBe(400);
     expect(empty.json().error).toBe(msg('ru', 'upload_empty'));
-    const restoreKind = await api(ctx.app, 'POST', '/api/admin/restore', ctx.adminToken, { kind: 'x' });
+    const restoreKind = await sendRestore(ctx.app, ctx.adminToken, { kind: 'x' });
     expect(restoreKind.statusCode).toBe(400);
     expect(restoreKind.json().error).toBe(msg('ru', 'upload_kind'));
   });
@@ -342,7 +386,7 @@ describe('POST /api/admin/upload', () => {
     const led = 'MOW-LED,2026-06-01,100,75';
     const unknown = 'MOW-XXX,2026-06-01,100,75';
     const { app, adminToken } = await adminApp({}, setupDir([header, aer, led].join('\n')));
-    const res = await api(app, 'POST', '/api/admin/upload', adminToken, { kind: 'forecast', content: [header, aer, unknown].join('\n') });
+    const res = await sendUpload(app, adminToken, { kind: 'forecast', content: [header, aer, unknown].join('\n') });
     const body = res.json();
     expect(body.ok).toBe(true);
     expect(body.summary.flights).toBe(1);
@@ -374,7 +418,7 @@ describe('POST /api/admin/upload', () => {
   });
 
   it('restore → back to the old file and numbers; restore without a backup → 404', async () => {
-    const res = await api(ctx.app, 'POST', '/api/admin/restore', ctx.adminToken, { kind: 'forecast' });
+    const res = await sendRestore(ctx.app, ctx.adminToken, { kind: 'forecast' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ ok: true, data: { ok: true, version: 3 } });
     expect(fs.readFileSync(ctx.forecastPath, 'utf8')).toBe(ORIGINAL_FORECAST);
@@ -382,7 +426,7 @@ describe('POST /api/admin/upload', () => {
     expect(r.median.wants).toBe(704.5);
     expect(r.dataVersion).toBe(3);
 
-    const none = await api(ctx.app, 'POST', '/api/admin/restore', ctx.adminToken, { kind: 'routes' });
+    const none = await sendRestore(ctx.app, ctx.adminToken, { kind: 'routes' });
     expect(none.statusCode).toBe(404);
     expect(none.json().error).toBe(msg('ru', 'not_found'));
   });
@@ -392,11 +436,12 @@ describe('POST /api/admin/upload', () => {
     const preview = (await upload({ kind: 'routes', content: changedRoutes })).json();
     expect(preview.ok).toBe(true);
     expect(preview.diff.changedFlights).toBe(0); // forecast rows unchanged
+    expect(preview.diff.changedRoutes).toEqual(['MOW-AER']);
     const applied = (await upload({ kind: 'routes', content: changedRoutes, apply: true })).json();
     expect(applied.applied).toBe(true);
     expect((await forecast(ctx.app, ctx.userToken, AER)).json().median.wants).toBe(634);
     expect(fs.readFileSync(`${ctx.routesPath}.bak`, 'utf8')).toBe(ORIGINAL_ROUTES);
-    await api(ctx.app, 'POST', '/api/admin/restore', ctx.adminToken, { kind: 'routes' });
+    await sendRestore(ctx.app, ctx.adminToken, { kind: 'routes' });
     expect((await forecast(ctx.app, ctx.userToken, AER)).json().median.wants).toBe(704.5);
   });
 
@@ -414,7 +459,7 @@ describe('POST /api/admin/upload', () => {
     const { app, adminToken } = await adminApp({}, setupDir(forecastContent, [header, aer, led].join('\n')));
     const routes = [header, aer, ...(hasDuplicate ? [aer] : [])].join('\n');
 
-    const res = await api(app, 'POST', '/api/admin/upload', adminToken, { kind: 'routes', content: routes });
+    const res = await sendUpload(app, adminToken, { kind: 'routes', content: routes });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
@@ -431,7 +476,7 @@ describe('POST /api/admin/upload', () => {
     const header = ORIGINAL_ROUTES.split(/\r?\n/, 1)[0];
     const content = `${header}\nMOW-XXX,Москва — Новый город,9000,4200,0.141,5400,18000\n`;
 
-    const res = await api(app, 'POST', '/api/admin/upload', adminToken, { kind: 'routes', content });
+    const res = await sendUpload(app, adminToken, { kind: 'routes', content });
 
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({
@@ -481,7 +526,7 @@ describe('uploading the route directory before its forecast', () => {
     const ctx = await adminApp();
     const existingRows = keepOriginalRoutes ? ORIGINAL_ROUTES.trimEnd() : ORIGINAL_ROUTES.split(/\r?\n/, 1)[0];
     const content = `${existingRows}\nAER-MOW,Сочи — Москва,9000,4200,0.141,5400,18000\n`;
-    const preview = await api(ctx.app, 'POST', '/api/admin/upload', ctx.adminToken, { kind: 'routes', content });
+    const preview = await sendUpload(ctx.app, ctx.adminToken, { kind: 'routes', content });
     expect(preview.statusCode).toBe(200);
     expect(preview.json()).toMatchObject({
       ok: true,
@@ -492,7 +537,7 @@ describe('uploading the route directory before its forecast', () => {
     expect(preview.json().summary.routes).toHaveLength(routes);
     expect(fs.readFileSync(ctx.routesPath, 'utf8')).toBe(ORIGINAL_ROUTES);
 
-    const applied = await api(ctx.app, 'POST', '/api/admin/upload', ctx.adminToken, { kind: 'routes', content, apply: true });
+    const applied = await sendUpload(ctx.app, ctx.adminToken, { kind: 'routes', content, apply: true });
     expect(applied.statusCode).toBe(200);
     expect(applied.json()).toMatchObject({ ok: true, applied: true, data: { flights, routes } });
     const afterRoutes = await meta(ctx.app, ctx.userToken);
@@ -501,7 +546,7 @@ describe('uploading the route directory before its forecast', () => {
 
     const forecastRow = ORIGINAL_FORECAST.split(/\r?\n/).find((row) => row.startsWith(AER_0601))!;
     const forecastContent = `${ORIGINAL_FORECAST.trimEnd()}\n${forecastRow.replace('MOW-AER', 'AER-MOW')}\n`;
-    const appliedForecast = await api(ctx.app, 'POST', '/api/admin/upload', ctx.adminToken, {
+    const appliedForecast = await sendUpload(ctx.app, ctx.adminToken, {
       kind: 'forecast', content: forecastContent, apply: true,
     });
     expect(appliedForecast.statusCode).toBe(200);
@@ -515,19 +560,12 @@ describe('uploading the route directory before its forecast', () => {
 });
 
 describe('admin recovery when no data is loaded', () => {
-  // Было (исправлено): POST /api/admin/upload cannot repair a server that has no data loaded. The preview builds the
-  // snapshot with `current!.source.forecast/routes` (src/server/routes.ts:476) although `current`
-  // (app.data.get()) is null when the startup load failed, so the TypeError is caught and returned as
-  // {ok:false, error:"Cannot read properties of null (reading 'source')"} (untranslated). Besides,
-  // readCurrentTexts() (routes.ts:463-467) reads BOTH files and blanks both on any failure, so
-  // uploading a missing routes.csv also discards the existing forecast text. Repro: start with a valid
-  // routes.csv and an invalid seasonal_forecast.csv ("route,date\nx,y"), log in as admin, POST
-  // /api/admin/upload {kind:"forecast", content:<valid forecast>, apply:true} → ok:false, file untouched.
+  // При холодном запуске без снимка можно починить один CSV, если второй остаётся исправным.
   it('an admin can upload a valid forecast when the current one failed to load', async () => {
     const files = setupDir('route,date\nMOW-AER,2026-06-01\n', ORIGINAL_ROUTES);
     const ctx = await adminApp({}, files);
     expect((await ctx.app.inject({ method: 'GET', url: '/api/health' })).statusCode).toBe(503);
-    const res = await api(ctx.app, 'POST', '/api/admin/upload', ctx.adminToken, {
+    const res = await sendUpload(ctx.app, ctx.adminToken, {
       kind: 'forecast',
       content: ORIGINAL_FORECAST,
       apply: true,
@@ -540,7 +578,7 @@ describe('admin recovery when no data is loaded', () => {
     const files = setupDir();
     fs.rmSync(files.routesPath);
     const ctx = await adminApp({}, files);
-    const res = await api(ctx.app, 'POST', '/api/admin/upload', ctx.adminToken, {
+    const res = await sendUpload(ctx.app, ctx.adminToken, {
       kind: 'routes',
       content: ORIGINAL_ROUTES,
       apply: true,
@@ -553,13 +591,13 @@ describe('admin recovery when no data is loaded', () => {
     const files = setupDir();
     const ctx = await adminApp({}, files);
     // Apply a valid change (creates .bak), then break the file on disk by hand.
-    await api(ctx.app, 'POST', '/api/admin/upload', ctx.adminToken, { kind: 'forecast', content: CHANGED_FORECAST, apply: true });
+    await sendUpload(ctx.app, ctx.adminToken, { kind: 'forecast', content: CHANGED_FORECAST, apply: true });
     fs.writeFileSync(`${files.forecastPath}.bak`, ORIGINAL_FORECAST);
     fs.writeFileSync(files.forecastPath, 'garbage');
     const t = new Date(Date.now() + 60_000);
     fs.utimesSync(files.forecastPath, t, t);
     expect((await api(ctx.app, 'GET', '/api/admin/data', ctx.adminToken)).json().data.ok).toBe(false);
-    const res = await api(ctx.app, 'POST', '/api/admin/restore', ctx.adminToken, { kind: 'forecast' });
+    const res = await sendRestore(ctx.app, ctx.adminToken, { kind: 'forecast' });
     expect(res.json()).toMatchObject({ ok: true, data: { ok: true, error: null } });
     expect((await forecast(ctx.app, ctx.userToken, AER)).json().median.wants).toBe(704.5);
     expect(fs.readFileSync(`${files.forecastPath}.bak`, 'utf8')).toBe(ORIGINAL_FORECAST);
@@ -571,8 +609,157 @@ describe('admin recovery when no data is loaded', () => {
   ] as const)('не восстанавливает повреждённый резерв (%s)', async (kind, fileKey, original) => {
     const { app, adminToken, [fileKey]: file } = await adminApp();
     fs.writeFileSync(`${file}.bak`, 'garbage');
-    const res = await api(app, 'POST', '/api/admin/restore', adminToken, { kind });
+    const res = await sendRestore(app, adminToken, { kind });
     expect(res.statusCode).toBe(422);
     expect(fs.readFileSync(file, 'utf8')).toBe(original);
+  });
+});
+
+describe('подтверждение замены CSV при конкурентных запросах', () => {
+  it.each([
+    ['forecast', 'forecastPath', ORIGINAL_FORECAST, CHANGED_FORECAST],
+    ['routes', 'routesPath', ORIGINAL_ROUTES, ORIGINAL_ROUTES.replace('9000,4200,0.141,', '9000,4200,0.282,')],
+  ] as const)('выполняет один откат из 20 одновременных запросов (%s)', async (kind, fileKey, original, replacement) => {
+    const { app, adminToken, [fileKey]: file } = await adminApp();
+    const saved = await sendUpload(app, adminToken, { kind, content: replacement, filename: 'changed.csv', apply: true });
+    expect(saved.json()).toMatchObject({ applied: true, data: { version: 2 } });
+    const revision = await getRestoreRevision(app, adminToken, kind);
+    const results = await Promise.all(Array.from({ length: 20 }, () => api(
+      app, 'POST', '/api/admin/restore', adminToken, { kind, expectedRevision: revision },
+    )));
+    const codes = results.map((res) => res.statusCode).sort();
+    expect(codes).toEqual([200, ...Array(19).fill(409)]);
+    expect(results.find((res) => res.statusCode === 200)?.json().data.version).toBe(3);
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    expect(fs.readFileSync(`${file}.bak`, 'utf8')).toBe(replacement);
+
+    const replay = await api(app, 'POST', '/api/admin/restore', adminToken, { kind, expectedRevision: revision });
+    expect(replay.statusCode).toBe(409);
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
+    const deliberateUndo = await sendRestore(app, adminToken, { kind });
+    expect(deliberateUndo.json()).toMatchObject({ ok: true, data: { version: 4, source: { [kind]: { name: 'changed.csv' } } } });
+    expect(fs.readFileSync(file, 'utf8')).toBe(replacement);
+  });
+
+  it('требует предпросмотр именно применяемого имени и содержимого CSV', async () => {
+    const { app, adminToken, forecastPath } = await adminApp();
+    const candidate = { kind: 'forecast', filename: 'preview.csv', content: CHANGED_FORECAST };
+    const missingUpload = await api(app, 'POST', '/api/admin/upload', adminToken, { ...candidate, apply: true });
+    const missingRestore = await api(app, 'POST', '/api/admin/restore', adminToken, { kind: 'forecast' });
+    expect([missingUpload.statusCode, missingRestore.statusCode]).toEqual([428, 428]);
+    const { revision } = (await sendUpload(app, adminToken, candidate)).json();
+    const tampered = await Promise.all([
+      { ...candidate, filename: 'another.csv' },
+      { ...candidate, content: ORIGINAL_FORECAST },
+      { ...candidate, kind: 'routes' },
+    ].map((payload) => api(app, 'POST', '/api/admin/upload', adminToken, { ...payload, apply: true, expectedRevision: revision })));
+    expect(tampered.map((response) => response.statusCode)).toEqual([409, 409, 409]);
+    expect(fs.readFileSync(forecastPath, 'utf8')).toBe(ORIGINAL_FORECAST);
+    expect(fs.existsSync(`${forecastPath}.bak`)).toBe(false);
+  });
+
+  it('запрещает применять предпросмотр после записи второго CSV, даже при исходных размере и mtime', async () => {
+    const { app, adminToken, routesPath, forecastPath } = await adminApp();
+    const changedRoutes = ORIGINAL_ROUTES.replace('9000,4200,0.141,', '9000,4200,0.282,');
+    const fixedTime = new Date('2025-01-02T03:04:05Z');
+    fs.utimesSync(routesPath, fixedTime, fixedTime);
+    const candidate = { kind: 'forecast', content: CHANGED_FORECAST };
+    const { revision } = (await sendUpload(app, adminToken, candidate)).json();
+    const before = fs.statSync(routesPath, { bigint: true });
+    fs.writeFileSync(routesPath, changedRoutes);
+    fs.utimesSync(routesPath, fixedTime, fixedTime);
+    const after = fs.statSync(routesPath, { bigint: true });
+    expect([after.ino, after.size, after.mtimeNs]).toEqual([before.ino, before.size, before.mtimeNs]);
+    const response = await api(app, 'POST', '/api/admin/upload', adminToken, {
+      ...candidate, apply: true, expectedRevision: revision,
+    });
+    expect(response.statusCode).toBe(409);
+    expect(fs.readFileSync(forecastPath, 'utf8')).toBe(ORIGINAL_FORECAST);
+    expect((await forecast(app, adminToken, AER)).json().median.wants).toBe(634);
+  });
+
+  it('сериализует загрузку и откат, подтверждённые для одного состояния', async () => {
+    const { app, adminToken, forecastPath } = await adminApp();
+    const previous = await sendUpload(app, adminToken, { kind: 'forecast', content: CHANGED_FORECAST, apply: true });
+    expect(previous.json().applied).toBe(true);
+    const candidate = { kind: 'forecast', content: CHANGED_FORECAST.trimEnd() + '\n\n', filename: 'latest.csv' };
+    const { revision } = (await sendUpload(app, adminToken, candidate)).json();
+    const rollback = await getRestoreRevision(app, adminToken, 'forecast');
+    const [upload, restore] = await Promise.all([
+      api(app, 'POST', '/api/admin/upload', adminToken, { ...candidate, apply: true, expectedRevision: revision }),
+      api(app, 'POST', '/api/admin/restore', adminToken, { kind: 'forecast', expectedRevision: rollback }),
+    ]);
+    expect([upload.statusCode, restore.statusCode].sort()).toEqual([200, 409]);
+    expect(fs.readFileSync(forecastPath, 'utf8')).toBe(upload.statusCode === 200 ? candidate.content : ORIGINAL_FORECAST);
+    expect(fs.readFileSync(`${forecastPath}.bak`, 'utf8')).toBe(CHANGED_FORECAST);
+  });
+
+  it('запрещает откат, если оставшийся CSV повреждён, и сохраняет резерв', async () => {
+    const { app, adminToken, forecastPath, routesPath } = await adminApp();
+    const changed = await sendUpload(app, adminToken, { kind: 'forecast', content: CHANGED_FORECAST, apply: true });
+    expect(changed.json().applied).toBe(true);
+    fs.writeFileSync(routesPath, 'broken');
+    const restore = await sendRestore(app, adminToken, { kind: 'forecast' });
+    expect(restore.statusCode).toBe(422);
+    expect(fs.readFileSync(forecastPath, 'utf8')).toBe(CHANGED_FORECAST);
+    expect(fs.readFileSync(`${forecastPath}.bak`, 'utf8')).toBe(ORIGINAL_FORECAST);
+  });
+
+  it('проверяет изменения второго CSV ещё раз после подготовки резерва', async () => {
+    const { app, adminToken, forecastPath, routesPath } = await adminApp();
+    const seed = await sendUpload(app, adminToken, { kind: 'forecast', content: CHANGED_FORECAST, apply: true });
+    expect(seed.json().applied).toBe(true);
+    const candidate = { kind: 'forecast', content: ORIGINAL_FORECAST, filename: 'candidate.csv' };
+    const { revision } = (await sendUpload(app, adminToken, candidate)).json();
+    const rename = fs.renameSync;
+    const overwrite = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      rename(from, to);
+      if (to === `${forecastPath}.bak.transaction`) {
+        fs.writeFileSync(routesPath, ORIGINAL_ROUTES.replace('9000,4200,0.141,', '9000,4200,0.282,'));
+      }
+    });
+    try {
+      const applied = await api(app, 'POST', '/api/admin/upload', adminToken, { ...candidate, apply: true, expectedRevision: revision });
+      expect(applied.statusCode).toBe(409);
+    } finally {
+      overwrite.mockRestore();
+    }
+    const info = await api(app, 'GET', '/api/admin/data', adminToken);
+    expect(info.json().backups.forecast).toBe(true);
+    expect(fs.readFileSync(forecastPath, 'utf8')).toBe(CHANGED_FORECAST);
+    expect(fs.readFileSync(`${forecastPath}.bak`, 'utf8')).toBe(ORIGINAL_FORECAST);
+  });
+
+  it('позволяет восстановить оба повреждённых активных CSV по очереди', async () => {
+    const files = setupDir('broken', 'broken');
+    fs.writeFileSync(`${files.forecastPath}.bak`, ORIGINAL_FORECAST);
+    fs.writeFileSync(`${files.routesPath}.bak`, ORIGINAL_ROUTES);
+    const { app, adminToken } = await adminApp({}, files);
+    expect((await app.inject('/api/health')).statusCode).toBe(503);
+    const first = await sendRestore(app, adminToken, { kind: 'forecast' });
+    expect(first.json()).toMatchObject({ ok: true, data: { ok: false } });
+    expect(fs.readFileSync(files.forecastPath, 'utf8')).toBe(ORIGINAL_FORECAST);
+    expect((await app.inject('/api/health')).statusCode).toBe(503);
+    const second = await sendRestore(app, adminToken, { kind: 'routes' });
+    expect(second.json()).toMatchObject({ ok: true, data: { ok: true, flights: 155, routes: 5 } });
+    expect((await app.inject('/api/health')).statusCode).toBe(200);
+  });
+
+  it('не предлагает старый резерв после повреждения журнала и создаёт новый при подтверждённой замене', async () => {
+    const { app, adminToken, forecastPath } = await adminApp();
+    const seed = await sendUpload(app, adminToken, { kind: 'forecast', content: CHANGED_FORECAST, apply: true });
+    expect(seed.json().applied).toBe(true);
+    fs.writeFileSync(`${forecastPath}.bak.transaction`, '87:123:');
+    const blocked = await api(app, 'GET', '/api/admin/data', adminToken);
+    expect(blocked.json().backups.forecast).toBe(false);
+    const repaired = await sendUpload(app, adminToken, {
+      kind: 'forecast', filename: 'repair.csv', content: ORIGINAL_FORECAST, apply: true,
+    });
+    expect(repaired.json()).toMatchObject({ ok: true, applied: true, data: { ok: true } });
+    expect(fs.readFileSync(`${forecastPath}.bak`, 'utf8')).toBe(CHANGED_FORECAST);
+    expect(fs.existsSync(`${forecastPath}.bak.transaction`)).toBe(false);
+    const restored = await sendRestore(app, adminToken, { kind: 'forecast' });
+    expect(restored.json()).toMatchObject({ ok: true, data: { ok: true } });
+    expect(fs.readFileSync(forecastPath, 'utf8')).toBe(CHANGED_FORECAST);
   });
 });

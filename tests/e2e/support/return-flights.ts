@@ -1,6 +1,7 @@
 /** Готовит обратные рейсы для браузерных тестов выбора маршрута. */
 import { readFileSync } from 'node:fs';
-import { request, type APIRequestContext } from '@playwright/test';
+import { request } from '@playwright/test';
+import { restoreDataset, uploadDataset } from './admin-data';
 import { ADMIN } from './admin-user';
 import { expect, test } from './fixtures';
 
@@ -32,34 +33,6 @@ function csvWithReturnFlights(kind: DatasetKind): string {
     return cells.join(',');
   });
   return [csv, ...additions, ''].join('\n');
-}
-
-/**
- * Заменяет один CSV на тестовом сервере и проверяет применение загрузки.
- * @param api Обязательный открытый контекст запроса с сессией администратора.
- * @param kind Обязательный тип CSV, соответствующий содержимому.
- * @param content Обязательный непустой текст полного CSV с заголовком.
- * @returns Promise<void> после подтверждения сервером, что CSV применён.
- * @throws Ошибка запроса, отказ HTTP, ошибка разбора ответа или отклонение CSV.
- * @remarks Меняет временный CSV и его резервную копию через API. Запрос не повторяется.
- */
-async function uploadDataset(api: APIRequestContext, kind: DatasetKind, content: string): Promise<void> {
-  const response = await api.post('/api/admin/upload', { data: { kind, content, apply: true } });
-  expect(response.ok(), await response.text()).toBe(true);
-  expect(await response.json()).toMatchObject({ ok: true, applied: true });
-}
-
-/**
- * Восстанавливает резервную копию CSV на тестовом сервере.
- * @param api Обязательный открытый контекст запроса с сессией администратора.
- * @param kind Обязательный тип CSV, для которого уже завершилась загрузка.
- * @returns Promise<void> после подтверждённого восстановления.
- * @throws Ошибка запроса, отказ HTTP или отсутствие резервной копии.
- * @remarks Меняет временный CSV через API. Повторных запросов не выполняет.
- */
-async function restoreDataset(api: APIRequestContext, kind: DatasetKind): Promise<void> {
-  const response = await api.post('/api/admin/restore', { data: { kind } });
-  expect(response.ok(), await response.text()).toBe(true);
 }
 
 /**

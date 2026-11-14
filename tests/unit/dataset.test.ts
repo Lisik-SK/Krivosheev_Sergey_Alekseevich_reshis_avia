@@ -236,6 +236,12 @@ describe('parseRoutesCsv', () => {
 });
 
 describe('parseForecastCsv', () => {
+  it('отклоняет повторяющиеся заголовки маршрута, вместимости и квантиля', () => {
+    expect(() => parseRoutesCsv('route,Route,base_price,price_sensitivity\nMOW-AER,MOW-LED,9000,0.1\n')).toThrow(CsvError);
+    expect(() => parseForecastCsv('route,date,seats,SEATS,0.5_base_demand\nMOW-AER,2026-06-01,100,200,40\n')).toThrow(CsvError);
+    expect(() => parseForecastCsv('route;date;seats;0.5_base_demand;0,50_base_demand\nMOW-AER;2026-06-01;100;40;60\n')).toThrow(CsvError);
+  });
+
   it('parses the real seasonal_forecast.csv', () => {
     const parsed = parseForecastCsv(FORECAST_TEXT);
     expect(parsed.warnings).toEqual([]);

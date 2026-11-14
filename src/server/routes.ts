@@ -11,7 +11,10 @@ import {
   resolveCityCode,
 } from '../shared/forecast.js';
 import { LocalizedError, render, type Lang, type Localizable } from '../shared/messages.js';
-import { buildSnapshot, flightKey, toLoadError, validateDataFile, type DatasetSnapshot } from './dataStore.js';
+import { flightKey, toLoadError, validateDataFile, type DataKind, type DataStatus, type DatasetSnapshot } from './dataStore.js';
+import { buildDataCandidate } from './data-candidate.js';
+import { decodeDataFile } from './data-file.js';
+import { requireRevision, restoreRevision, uploadRevision } from './data-revision.js';
 import { HttpError, L, SESSION_COOKIE, clearSessionCookie, setSessionCookie } from './http.js';
 
 export const PRICE_LIMIT = 1_000_000;
@@ -28,13 +31,29 @@ function requireAdmin(req: FastifyRequest) {
   return user;
 }
 
-function requireData(app: FastifyInstance, lang: Lang): DatasetSnapshot {
-  const snap = app.data.get();
-  if (!snap) {
-    const { error } = app.data.status();
+/**
+ * Возвращает рабочий снимок из уже считанного состояния или отклоняет запрос без данных.
+ * @param status Обязательное состояние хранилища, может содержать последний исправный снимок.
+ * @param lang Обязательный язык ответа об ошибке.
+ * @returns Исправный снимок, в том числе предыдущий при ошибке перечитывания CSV.
+ * @throws HttpError 503 при отсутствии снимка. Диск и состояние не меняет.
+ */
+function requireSnapshot({ snapshot, error }: DataStatus, lang: Lang): DatasetSnapshot {
+  if (!snapshot) {
     throw new HttpError(503, 'data_unavailable', { reason: error ? error.text(lang) : render(lang, L('data_not_loaded')) });
   }
-  return snap;
+  return snapshot;
+}
+
+/**
+ * Получает один снимок для всего расчёта.
+ * @param app Обязательный сервер с хранилищем CSV.
+ * @param lang Обязательный язык ответа об ошибке.
+ * @returns Рабочий снимок. При его отсутствии выбрасывает HttpError 503.
+ * @remarks Хранилище может синхронно перечитать диск и обновить снимок в памяти. Записей на диск нет.
+ */
+function requireData(app: FastifyInstance, lang: Lang): DatasetSnapshot {
+  return requireSnapshot(app.data.status(), lang);
 }
 
 /**
@@ -42,11 +61,11 @@ function requireData(app: FastifyInstance, lang: Lang): DatasetSnapshot {
  * @param app Обязательный сервер с настроенным хранилищем.
  * @param lang Обязательный язык сообщений.
  * @param includeUploadedNames true для административных ответов, по умолчанию false.
+ * @param st Необязательное считанное состояние; по умолчанию считывается из хранилища.
  * @returns Метаданные с локализованными ошибками; source равен null без загруженного снимка.
  * @remarks Читает состояние хранилища, которое может перечитать CSV. Записей и сетевых запросов нет.
  */
-function dataInfo(app: FastifyInstance, lang: Lang, includeUploadedNames = false) {
-  const st = app.data.status();
+function dataInfo(app: FastifyInstance, lang: Lang, includeUploadedNames = false, st = app.data.status()) {
   const s = st.snapshot;
   return {
     ok: st.ok,
@@ -215,8 +234,16 @@ const authRateLimit = (app: FastifyInstance) => ({
   rateLimit: { max: app.config.authRateLimitPerMinute, timeWindow: '1 minute' },
 });
 
+/**
+ * Регистрирует HTTP-маршруты сервиса, привязанные к переданному экземпляру Fastify.
+ * @param app Обязательный экземпляр с настройками, службой авторизации, БД и хранилищем CSV.
+ * @returns Promise регистрации; ошибки конфигурации Fastify распространяются.
+ * @remarks Регистрация только настраивает сервер. Каждый зарегистрированный обработчик владеет своим запросом;
+ * операции с CSV синхронно проверяют ревизию и публикуют максимум один файл в одном процессе.
+ */
 export async function registerApiRoutes(app: FastifyInstance) {
   app.get('/api/health', async (req, reply) => {
+    reply.header('Cache-Control', 'no-store');
     const info = dataInfo(app, req.lang);
     const status = info.ok && info.flights > 0 ? 'ok' : info.routes > 0 ? 'degraded' : 'error';
     // Если даже справочник недоступен, отдаём 503 для проверки хостинга.
@@ -268,9 +295,10 @@ export async function registerApiRoutes(app: FastifyInstance) {
 
   app.get('/api/meta', async (req, reply) => {
     requireUser(req);
-    const snap = requireData(app, req.lang);
+    const status = app.data.status();
+    const snap = requireSnapshot(status, req.lang);
     reply.header('Cache-Control', 'no-store');
-    return { routes: snap.routes.map((r) => routeView(r, snap)), data: dataInfo(app, req.lang) };
+    return { routes: snap.routes.map((r) => routeView(r, snap)), data: dataInfo(app, req.lang, false, status) };
   });
 
   // ---------- Прогноз по рейсу ----------
@@ -287,7 +315,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
       failIfFields(fields);
       const flight = findFlight(snap, route!, date!, req.lang);
       reply.header('Cache-Control', 'no-store');
-      return { ...computeForecast(flight, route!, price!), dataVersion: snap.version };
+      return { ...computeForecast(flight, route!, price!), dataVersion: snap.version, dataLoadedAt: snap.loadedAt };
     } catch (err) {
       throw localizeRouteMissing(err, req.lang);
     }
@@ -317,6 +345,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
         points: profitCurve(median.baseDemand, flight.seats, route!, 61, bounds),
         optimum: optimalPrice(median.baseDemand, flight.seats, route!, bounds),
         dataVersion: snap.version,
+        dataLoadedAt: snap.loadedAt,
       };
     } catch (err) {
       throw localizeRouteMissing(err, req.lang);
@@ -339,6 +368,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
         price,
         days: dates.map((d) => daySummary(snap.flights.get(flightKey(route!.code, d))!, route!, price!)),
         dataVersion: snap.version,
+        dataLoadedAt: snap.loadedAt,
       };
     } catch (err) {
       throw localizeRouteMissing(err, req.lang);
@@ -379,7 +409,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
         },
       ];
     });
-    return { date, priceMode: mode, dates: allDates, flights, dataVersion: snap.version };
+    return { date, priceMode: mode, dates: allDates, flights, dataVersion: snap.version, dataLoadedAt: snap.loadedAt };
   });
 
   // ---------- История расчётов (дополнение 5) ----------
@@ -478,11 +508,16 @@ export async function registerApiRoutes(app: FastifyInstance) {
   app.get('/api/admin/data', async (req, reply) => {
     requireAdmin(req);
     reply.header('Cache-Control', 'no-store');
+    // Перед выдачей ревизий завершаем прерванную подготовку резерва и перенос его имени, если это возможно.
+    const backups = { forecast: app.data.hasBackup('forecast'), routes: app.data.hasBackup('routes') };
+    app.data.refreshIfChanged(true);
+    const revision = app.data.currentRevision();
     return {
       data: dataInfo(app, req.lang, true),
-      backups: {
-        forecast: app.data.hasBackup('forecast'),
-        routes: app.data.hasBackup('routes'),
+      backups,
+      revisions: {
+        forecast: restoreRevision(revision, app.data.forecastPath),
+        routes: restoreRevision(revision, app.data.routesPath),
       },
       uploadMaxMb: app.config.uploadMaxMb,
     };
@@ -527,23 +562,14 @@ export async function registerApiRoutes(app: FastifyInstance) {
         throw new HttpError(413, 'upload_too_large', { mb: app.config.uploadMaxMb });
       }
 
+      const expectedCurrent = app.data.currentRevision();
+      const revision = uploadRevision(expectedCurrent, kind, filename, content);
+      if (body.apply === true) requireRevision(body.expectedRevision, revision);
+      app.data.refreshIfChanged(true);
       const current = app.data.get();
-      // Даже если текущие данные сломаны или файла нет, администратор может загрузить исправленный.
-      const texts = app.data.readCurrentTexts();
-      if (kind === 'forecast') texts.forecast = content;
-      else texts.routes = content;
-
       let next: DatasetSnapshot;
       try {
-        const fake = { name: filename ?? kind, size: Buffer.byteLength(content), modifiedAt: new Date().toISOString() };
-        next = buildSnapshot(texts.routes, texts.forecast, {
-          version: 0,
-          replacingRoutes: kind === 'routes',
-          source: {
-            forecast: kind === 'forecast' ? fake : (current?.source.forecast ?? app.data.fileInfoOrEmpty('forecast')),
-            routes: kind === 'routes' ? fake : (current?.source.routes ?? app.data.fileInfoOrEmpty('routes')),
-          },
-        });
+        next = buildDataCandidate(app.data, kind, content, filename, current);
       } catch (err) {
         const text = toLoadError(err).text(req.lang);
         return { ok: false, applied: false, error: text };
@@ -552,32 +578,38 @@ export async function registerApiRoutes(app: FastifyInstance) {
       const summary = summarize(next);
       const diff = current ? compare(current, next) : null;
       const warnings = next.warnings.map((w) => render(req.lang, w));
+      if (app.data.currentRevision() !== expectedCurrent) throw new HttpError(409, 'data_revision_conflict');
 
       if (body.apply === true) {
         try {
-          app.data.replaceFile(kind, Buffer.from(content), filename);
+          app.data.replaceFile(kind, Buffer.from(content), filename, expectedCurrent, true);
         } catch (err) {
+          if (err instanceof LocalizedError && err.key === 'data_revision_conflict') throw new HttpError(409, err.key);
           throw new HttpError(500, 'upload_write_failed', { reason: (err as Error).message });
         }
         req.log.info({ kind, flights: summary.flights }, 'Администратор заменил файл данных');
         return { ok: true, applied: true, summary, diff, warnings, data: dataInfo(app, req.lang, true) };
       }
-      return { ok: true, applied: false, summary, diff, warnings };
+      return { ok: true, applied: false, summary, diff, warnings, revision };
     },
   );
 
   /**
-   * Проверяет и восстанавливает резервный CSV по обязательному типу из запроса администратора.
-   * Возвращает новое состояние данных; при неверном типе — 400, без входа — 401, без прав — 403,
-   * при отсутствии копии — 404, при ошибке разбора — 422.
-   * Копия проверяется до записи; при успехе заменяет текущий CSV по тем же правилам, что и загрузка.
-   * Остальные ошибки чтения или записи обрабатывает сервер.
+   * Восстанавливает резервный CSV по обязательным типу и ревизии из запроса администратора.
+   * Возвращает новое состояние данных. Ошибки: 400 неверный тип, 401 без сессии, 403 без прав,
+   * 404 без копии, 409 версия изменилась, 422 данные не читаются, 428 нет подтверждения.
+   * Синхронно проверяет резерв вместе со вторым CSV, перепроверяет ревизию и лишь затем
+   * публикует копию. При ошибке проверки активные файлы не меняются; ошибки записи распространяются.
    */
   app.post('/api/admin/restore', async (req) => {
     requireAdmin(req);
     const body = (req.body ?? {}) as Body;
     const kind = body.kind === 'forecast' || body.kind === 'routes' ? body.kind : null;
     if (!kind) throw new HttpError(400, 'upload_kind');
+    const target = kind === 'forecast' ? app.data.forecastPath : app.data.routesPath;
+    const expectedCurrent = app.data.currentRevision();
+    const revision = restoreRevision(expectedCurrent, target);
+    requireRevision(body.expectedRevision, revision);
     let backup: ReturnType<typeof app.data.readBackup>;
     try {
       backup = app.data.readBackup(kind);
@@ -586,14 +618,40 @@ export async function registerApiRoutes(app: FastifyInstance) {
       throw err;
     }
     try {
-      validateDataFile(kind, backup.content);
+      checkRestoreCandidate(app, kind, backup);
     } catch (err) {
       if (!(err instanceof LocalizedError)) throw err;
       throw new HttpError(422, 'restore_invalid', { reason: err.localize(req.lang) });
     }
-    app.data.replaceFile(kind, backup.content, backup.name);
+    requireRevision(revision, restoreRevision(app.data.currentRevision(), target));
+    try {
+      app.data.replaceFile(kind, backup.content, backup.name, expectedCurrent);
+    } catch (err) {
+      if (err instanceof LocalizedError && err.key === 'data_revision_conflict') throw new HttpError(409, err.key);
+      throw err;
+    }
     return { ok: true, data: dataInfo(app, req.lang, true) };
   });
+}
+
+/**
+ * Проверяет пригодность резерва в паре с текущим вторым CSV.
+ * @param app Обязательный сервер с хранилищем данных.
+ * @param kind Обязательный тип заменяемого файла: forecast или routes.
+ * @param backup Обязательные байты и имя CSV, которые будут опубликованы при успешном откате.
+ * @returns Ничего при успехе. Если оба активных CSV повреждены, допускает восстановление
+ * одного исправного резерва, оставляя статус набора ошибочным до исправления второго файла.
+ * Ошибки кодировки, чтения и разбора распространяются, если восстановление недопустимо.
+ * @remarks Синхронно читает второй файл и может освежить снимок в памяти. Не меняет файлы.
+ */
+function checkRestoreCandidate(app: FastifyInstance, kind: DataKind, backup: { content: Buffer; name: string }): void {
+  const content = decodeDataFile(backup.content, kind === 'forecast' ? 'what_forecast' : 'what_routes');
+  try {
+    buildDataCandidate(app.data, kind, content, backup.name, app.data.get());
+  } catch (error) {
+    if (!(error instanceof LocalizedError) || app.data.hasValidCurrentFile(kind)) throw error;
+    validateDataFile(kind, backup.content);
+  }
 }
 
 function summarize(s: DatasetSnapshot) {
@@ -607,7 +665,13 @@ function summarize(s: DatasetSnapshot) {
   };
 }
 
-/** Изменения в справочнике, количестве рейсов и средней медиане спроса. */
+/**
+ * Сравнивает справочники и прогнозы двух снимков.
+ * @param prev Обязательный текущий снимок, в том числе последний исправный после ошибки чтения.
+ * @param next Обязательный проверенный снимок кандидата.
+ * @returns Коды добавленных, удалённых и изменённых маршрутов, счётчики рейсов и средний спрос.
+ * @remarks Читает снимки без ввода-вывода и записей; предполагает, что каждый рейс имеет медиану.
+ */
 function compare(prev: DatasetSnapshot, next: DatasetSnapshot) {
   const prevRoutes = new Set(prev.routes.map((r) => r.code));
   const nextRoutes = new Set(next.routes.map((r) => r.code));
@@ -636,6 +700,8 @@ function compare(prev: DatasetSnapshot, next: DatasetSnapshot) {
   return {
     addedRoutes: [...nextRoutes].filter((r) => !prevRoutes.has(r)),
     removedRoutes: [...prevRoutes].filter((r) => !nextRoutes.has(r)),
+    changedRoutes: [...nextRoutes].filter((code) =>
+      prevRoutes.has(code) && JSON.stringify(prev.routeByCode.get(code)) !== JSON.stringify(next.routeByCode.get(code))),
     changedFlights,
     removedFlights,
     perRoute,

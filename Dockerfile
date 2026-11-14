@@ -6,6 +6,12 @@ COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY tsconfig.json tsconfig.server.json vite.config.ts ./
 COPY src ./src
+COPY vitest.config.ts ./
+COPY data ./data
+COPY tests/api ./tests/api
+COPY tests/unit ./tests/unit
+# Проверки CSV выполняются до публикации образа на временных файлах, без доступа к тому /data.
+RUN npm test -- tests/api/admin.test.ts tests/api/data.test.ts tests/api/data-file-backup.test.ts tests/api/file-encoding.test.ts tests/unit/csv.test.ts tests/unit/dataset.test.ts
 RUN npm run build && npm prune --omit=dev
 
 # ---------- запуск ----------

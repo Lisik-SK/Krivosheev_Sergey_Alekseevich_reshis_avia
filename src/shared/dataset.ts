@@ -85,6 +85,20 @@ export const KNOWN_CITIES: Record<string, string> = {
 
 const QUANTILE_COLUMN = /^(0?[.,]\d+|0|1(?:[.,]0+)?)_(base_demand|price_demand|price)$/;
 
+/** Названия обязательных столбцов справочника маршрутов. */
+const ROUTE_REQUIRED_COLUMNS = ['route', 'base_price', 'price_sensitivity'] as const;
+
+/** Названия столбцов справочника, которые используются при чтении маршрутов. */
+const ROUTE_COLUMNS = [
+  ...ROUTE_REQUIRED_COLUMNS, 'name', 'cost_per_passenger', 'price_min', 'price_max',
+] as const;
+
+/** Названия обязательных столбцов прогноза вне группы квантилей. */
+const FORECAST_REQUIRED_COLUMNS = ['route', 'date', 'seats'] as const;
+
+/** Суффиксы заголовков, связывающие столбец с величиной для конкретного уровня квантиля. */
+type QuantileColumn = 'base_demand' | 'price' | 'price_demand';
+
 /** Делает спрос неубывающим по q, не меняя медиану. Возвращает true, если что-то исправлено. */
 export function enforceMonotone(quantiles: QuantileForecast[]): boolean {
   const mid = quantiles.findIndex((x) => x.q === 0.5);
@@ -139,11 +153,21 @@ export function normalizeDate(raw: string): string | null {
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 
-function columnIndex(header: string[]): Map<string, number> {
+/**
+ * Строит индекс значимых столбцов независимо от регистра и пробелов по краям.
+ * @param header Заголовки в исходном порядке; неизвестные столбцы игнорируются.
+ * @param recognized Допустимые названия известных столбцов в нижнем регистре.
+ * @returns Отображение нормализованных названий в номера столбцов с нуля.
+ * @throws {CsvError} Если известный заголовок встречается в нескольких столбцах.
+ * @remarks Работает в памяти и не меняет входные массивы.
+ */
+function columnIndex(header: string[], recognized: readonly string[]): Map<string, number> {
   const map = new Map<string, number>();
   header.forEach((h, i) => {
     const key = h.trim().toLowerCase();
-    if (!map.has(key)) map.set(key, i);
+    if (!recognized.includes(key)) return;
+    if (map.has(key)) throw new CsvError('csv_duplicate_column', { column: key });
+    map.set(key, i);
   });
   return map;
 }
@@ -152,11 +176,17 @@ function formatQuantile(q: number): string {
   return String(Math.round(q * 1000) / 1000);
 }
 
+/**
+ * Разбирает и проверяет справочник маршрутов.
+ * @param text Обязательный текст CSV со столбцами маршрута, базовой цены и чувствительности.
+ * @returns Маршруты и замечания; при повторе маршрута остаётся последняя строка.
+ * @throws {CsvError} При повреждённом CSV, ошибках схемы, значений или отсутствии маршрутов.
+ * @remarks Работает в памяти; дополнительные столбцы допускаются, известных столбцов должно быть не больше одного.
+ */
 export function parseRoutesCsv(text: string): { routes: RouteInfo[]; warnings: Localizable[] } {
   const table = parseCsv(text);
-  const idx = columnIndex(table.header);
-  const required = ['route', 'base_price', 'price_sensitivity'];
-  const missing = required.filter((c) => !idx.has(c));
+  const idx = columnIndex(table.header, ROUTE_COLUMNS);
+  const missing = ROUTE_REQUIRED_COLUMNS.filter((c) => !idx.has(c));
   if (missing.length) {
     throw new CsvError('routes_missing_cols', { cols: missing.join(', ') });
   }
@@ -222,30 +252,38 @@ export function parseRoutesCsv(text: string): { routes: RouteInfo[]; warnings: L
   return { routes, warnings };
 }
 
+/**
+ * Разбирает и проверяет прогноз спроса по рейсам.
+ * @param text Обязательный CSV с маршрутами, датами, вместимостью и спросом, в том числе медианой.
+ * @returns Рейсы, возрастающие уровни квантилей и замечания. Для повторного рейса сохраняется последняя строка,
+ * а пересекающиеся квантили приводятся к неубывающему порядку с сохранением медианы.
+ * @throws {CsvError} При повреждённом CSV, ошибках схемы, значений или отсутствии рейсов.
+ * @remarks Работает в памяти; независимые дополнительные столбцы допускаются, повтор известного поля запрещён.
+ */
 export function parseForecastCsv(text: string): ParsedForecast {
   const table = parseCsv(text);
-  const idx = columnIndex(table.header);
-  const missing = ['route', 'date', 'seats'].filter((c) => !idx.has(c));
+  const idx = columnIndex(table.header, FORECAST_REQUIRED_COLUMNS);
+  const missing = FORECAST_REQUIRED_COLUMNS.filter((c) => !idx.has(c));
   if (missing.length) {
     throw new CsvError('forecast_missing_cols', { cols: missing.join(', ') });
   }
 
   // Ищем колонки вида 0.1_base_demand, 0.1_price, 0.1_price_demand.
-  const levels = new Map<number, { base?: number; price?: number; priceDemand?: number }>();
+  const levels = new Map<number, Partial<Record<QuantileColumn, number>>>();
   table.header.forEach((h, i) => {
     const m = QUANTILE_COLUMN.exec(h.trim().toLowerCase());
     if (!m) return;
     const q = Number(m[1]!.replace(',', '.'));
     if (!(q > 0 && q < 1)) return;
+    const column = m[2] as QuantileColumn;
     const entry = levels.get(q) ?? {};
-    if (m[2] === 'base_demand') entry.base = i;
-    else if (m[2] === 'price') entry.price = i;
-    else entry.priceDemand = i;
+    if (entry[column] !== undefined) throw new CsvError('csv_duplicate_column', { column: h });
+    entry[column] = i;
     levels.set(q, entry);
   });
 
   const quantileLevels = [...levels.entries()]
-    .filter(([, cols]) => cols.base !== undefined)
+    .filter(([, cols]) => cols.base_demand !== undefined)
     .map(([q]) => q)
     .sort((a, b) => a - b);
 
@@ -276,16 +314,16 @@ export function parseForecastCsv(text: string): ParsedForecast {
 
     const quantiles: QuantileForecast[] = quantileLevels.map((q) => {
       const cols = levels.get(q)!;
-      const base = parseNumber(cells[cols.base!]);
+      const base = parseNumber(cells[cols.base_demand!]);
       if (base === null || !Number.isFinite(base)) {
-        throw new CsvError('quantile_not_number', { column: `${formatQuantile(q)}_base_demand`, value: cells[cols.base!] ?? '' }, line);
+        throw new CsvError('quantile_not_number', { column: `${formatQuantile(q)}_base_demand`, value: cells[cols.base_demand!] ?? '' }, line);
       }
       const opt = (col: number | undefined) => {
         if (col === undefined) return null;
         const v = parseNumber(cells[col]);
         return v !== null && Number.isFinite(v) ? v : null;
       };
-      return { q, baseDemand: base, price: opt(cols.price), priceDemand: opt(cols.priceDemand) };
+      return { q, baseDemand: base, price: opt(cols.price), priceDemand: opt(cols.price_demand) };
     });
 
     // Квантили модели иногда «перекрещиваются» (0.6 меньше 0.5). Медиану из файла

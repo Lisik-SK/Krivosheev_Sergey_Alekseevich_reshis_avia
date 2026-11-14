@@ -119,6 +119,11 @@ describe('parseCsv: quotes', () => {
     expect(cellsOf('a,b\n  "x,y",2\n')).toEqual([['x,y', '2']]);
   });
 
+  it('разрешает только пробелы между закрывающей кавычкой и разделителем', () => {
+    expect(cellsOf('a,b\n"x,y"  ,2\n')).toEqual([['x,y', '2']]);
+    expect(() => parseCsv('a,b\n"9000"1,2\n')).toThrow(CsvError);
+  });
+
   it('treats a quote in the middle of an unquoted field as a literal', () => {
     expect(cellsOf('a,b\n5"7,2\n')).toEqual([['5"7', '2']]);
   });
@@ -177,6 +182,19 @@ describe('parseCsv: delimiters', () => {
 
   it('only looks at the first line (with CRLF too)', () => {
     expect(parseCsv('a;b\r\n1,2;3\r\n').delimiter).toBe(';');
+  });
+
+  it.each(['\r', '\r\n', '\n'])('ищет разделитель в заголовке после пустой строки (%j)', (end) => {
+    const t = parseCsv(` ${end}a;b${end}1,2;3${end}`);
+    expect(t.delimiter).toBe(';');
+    expect(t.header).toEqual(['a', 'b']);
+    expect(t.rows).toEqual([{ line: 3, cells: ['1,2', '3'] }]);
+  });
+
+  it('распознаёт заголовок из нескольких строк с кавычками', () => {
+    const t = parseCsv('"a\nb";c\n1,2;3\n');
+    expect(t.delimiter).toBe(';');
+    expect(t.header).toEqual(['a\nb', 'c']);
   });
 });
 

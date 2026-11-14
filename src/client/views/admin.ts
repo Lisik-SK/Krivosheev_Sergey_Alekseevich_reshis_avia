@@ -11,7 +11,18 @@ import { t } from '../i18n';
 import { toast, type AppCtx } from './shell';
 import { warningDetails } from './warning-details';
 
+/** Тип управляемого CSV: исходный прогноз или справочник маршрутов. */
 type Kind = 'forecast' | 'routes';
+
+/** Имя и текст файла с типом, по которому сервер проверил содержимое. */
+interface CheckedFile {
+  kind: Kind;
+  name: string;
+  content: string;
+}
+
+/** Пауза в миллисекундах после успешного отката для защиты от серии быстрых нажатий. */
+const restoreCooldownMs = 1_000;
 
 /**
  * Создаёт экран управления CSV и подключает проверку, применение и откат версий.
@@ -31,7 +42,9 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
 
   let info: AdminData | null = null;
   let kind: Kind = 'forecast';
-  let pending: { name: string; content: string } | null = null;
+  let pending: File | null = null;
+  let checkGeneration = 0;
+  let mutating = false;
 
   const current = h('div', { class: 'card__body', 'data-testid': 'admin-current' });
   const kindForecast = h('input', { type: 'radio', name: 'kind', value: 'forecast', id: 'k-forecast', checked: true });
@@ -81,14 +94,21 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
    * Аргументов нет. Возвращает Promise<void> после обновления, показа ошибки или выхода по сигналу ухода.
    * @remarks Выполняет запрос чтения. При ответе 401 завершает сеанс, прочие ошибки выводит в интерфейсе.
    * После успешного ответа проверяет сигнал экрана и только затем обновляет DOM и подключает обработчики.
-   * Откат выполняется отдельным запросом при нажатии кнопки и повторно загружает сведения после успеха.
+   * Кнопки отката связываются с ревизиями прочитанных резервов и недоступны во время записи.
    */
   async function loadInfo() {
     try {
-      info = await api.adminData();
+      const next = await api.adminData();
       if (ctx.signal.aborted) return;
-      maxNote.textContent = t('a.maxSize', { mb: info.uploadMaxMb });
-      const src = info.data.source;
+      info = next;
+      maxNote.textContent = t('a.maxSize', { mb: next.uploadMaxMb });
+      const src = next.data.source;
+
+      /**
+       * Создаёт строку CSV для подписи, необязательных метаданных файла и обязательного типа.
+       * Возвращает элемент с доступными действиями. При нажатии обработчик отката передаёт
+       * тип и ревизию из загруженных сведений. Ошибки DOM передаются вызывающему коду.
+       */
       const row = (label: string, file: { name: string; size: number; modifiedAt: string } | undefined, k: Kind) => {
         const download = file ? h(
           'a',
@@ -100,20 +120,9 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
           icon('download'),
           t('a.download'),
         ) : null;
-        const restore = h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-testid': `restore-${k}` }, icon('undo'), t('a.restore'));
-        restore.addEventListener('click', async () => {
-          restore.setAttribute('disabled', '');
-          try {
-            await api.restore(k);
-            onDataChanged();
-            if (ctx.signal.aborted) return;
-            toast(t('a.restored'));
-            await loadInfo();
-          } catch (err) {
-            preview.replaceChildren(errorBox(err));
-          } finally {
-            restore.removeAttribute('disabled');
-          }
+        const restore = h('button', { type: 'button', class: 'btn btn--ghost btn--sm', 'data-testid': `restore-${k}`, disabled: mutating }, icon('undo'), t('a.restore'));
+        restore.addEventListener('click', () => {
+          void mutate(() => restoreFile(k, next.revisions[k]));
         });
         return h(
           'div',
@@ -121,43 +130,121 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
           h('span', { class: 'label' }, label),
           h('span', { class: 'mono' }, file?.name ?? '—'),
           h('span', { class: 'file-row__meta' }, file ? `${fmtNum(Math.max(0.1, file.size / 1024))} KB · ${t('a.modified')} ${fmtDateTime(file.modifiedAt)}` : ''),
-          h('div', { class: 'file-row__actions' }, download, info!.backups[k] ? restore : null),
+          h('div', { class: 'file-row__actions' }, download, next.backups[k] ? restore : null),
         );
       };
       current.replaceChildren(
         row(t('a.forecast'), src?.forecast, 'forecast'),
         row(t('a.routes'), src?.routes, 'routes'),
-        h('p', { class: 'field__hint' }, `${t('data.flights', { n: info.data.flights })}, ${t('data.routes', { n: info.data.routes })}`),
+        h('p', { class: 'field__hint' }, `${t('data.flights', { n: next.data.flights })}, ${t('data.routes', { n: next.data.routes })}`),
       );
-      if (info.data.error) current.append(h('div', { class: 'alert alert--warn' }, icon('info'), h('p', null, info.data.error)));
+      if (next.data.error) current.append(h('div', { class: 'alert alert--warn' }, icon('info'), h('p', null, next.data.error)));
     } catch (err) {
+      if (ctx.signal.aborted) return;
       if (err instanceof ApiError && err.status === 401) return ctx.onLogout(t('session.expired'));
+      info = null;
       current.replaceChildren(errorBox(err));
     }
   }
 
+  /**
+   * Создаёт плашку для произвольной ошибки, используя сообщение Error либо общий текст.
+   * Возвращает элемент без вставки в DOM; ошибки создания DOM распространяются.
+   */
   function errorBox(err: unknown) {
     return h('div', { class: 'alert alert--error', role: 'alert' }, icon('alert'), h('p', null, err instanceof Error ? err.message : t('error.generic')));
   }
 
-  async function check(file: File) {
+  /** Блокирует или разблокирует доступные действия записи по текущему состоянию; без аргументов и запросов. */
+  function syncMutationControls(): void {
+    for (const input of [fileInput, kindForecast, kindRoutes]) input.disabled = mutating;
+    for (const button of page.querySelectorAll<HTMLButtonElement>('[data-testid^="restore-"], [data-testid="admin-apply"], [data-testid="admin-cancel"]')) {
+      button.disabled = mutating;
+    }
+  }
+
+  /**
+   * Исключает одновременную запись и обрабатывает сбои действия.
+   * @param action Обязательная операция без аргументов. Возвращает Promise до окончания записи и обновления её результата.
+   * @returns Promise<void> после завершения или пропуска при занятом или закрытом экране.
+   * @remarks Инвалидирует незавершённые проверки файла. При сбое обновляет сведения, чтобы следующий
+   * откат использовал свежую ревизию даже при потере ответа на выполненную запись, и сбрасывает
+   * поле файла, чтобы тот же файл можно было выбрать заново. При 401 завершает сеанс.
+   * Пока операция выполняется, блокирует загрузку и откат обоих CSV. Запись не повторяет.
+   */
+  async function mutate(action: () => Promise<void>): Promise<void> {
+    if (mutating || ctx.signal.aborted) return;
+    mutating = true;
+    checkGeneration++;
+    syncMutationControls();
+    try {
+      await action();
+    } catch (err) {
+      if (ctx.signal.aborted) return;
+      if (err instanceof ApiError && err.status === 401) return ctx.onLogout(t('session.expired'));
+      pending = null;
+      fileInput.value = '';
+      preview.replaceChildren(errorBox(err));
+      await loadInfo();
+    } finally {
+      mutating = false;
+      if (!ctx.signal.aborted) syncMutationControls();
+    }
+  }
+
+  /**
+   * Запрашивает откат CSV для обязательных типа и ревизии выбранного резерва.
+   * Возвращает Promise<void> после уведомления об успехе, перечитывания сведений
+   * и короткой паузы, пока повторное нажатие на обновлённую кнопку заблокировано.
+   * Меняет данные сервера, очищает предпросмотр и сообщает рабочим экранам об успехе,
+   * даже если администратор ушёл со страницы. Ошибки запроса передаёт mutate.
+   */
+  async function restoreFile(fileKind: Kind, revision: string): Promise<void> {
+    pending = null;
+    fileInput.value = '';
+    preview.replaceChildren();
+    await api.restore(fileKind, revision);
+    onDataChanged();
+    if (ctx.signal.aborted) return;
+    toast(t('a.restored'));
+    await Promise.all([
+      loadInfo(),
+      new Promise<void>((resolve) => window.setTimeout(resolve, restoreCooldownMs)),
+    ]);
+  }
+
+  /**
+   * Читает выбранный файл UTF-8 и проверяет его для текущего типа CSV.
+   * @param file Обязательный браузерный File; ограничение размера берётся из сведений сервера.
+   * @returns Promise<void> после показа результата, ошибки или отмены более свежим действием.
+   * @remarks Запрашивает проверку без записи. Ответы более раннего файла, типа или экрана
+   * игнорирует; при сбое чтения/UTF-8 или ошибке API показывает сообщение, при 401 завершает сеанс.
+   */
+  async function check(file: File): Promise<void> {
+    if (mutating || ctx.signal.aborted) return;
+    pending = file;
+    const generation = ++checkGeneration;
+    const checkedKind = kind;
     if (info && file.size > info.uploadMaxMb * 1024 * 1024) {
       preview.replaceChildren(errorBox(new Error(t('a.maxSize', { mb: info.uploadMaxMb }))));
       return;
     }
     let content: string;
     try {
-      content = await file.text();
+      preview.replaceChildren(h('p', { class: 'field__hint' }, t('a.checking')));
+      content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer());
     } catch {
+      if (generation !== checkGeneration || ctx.signal.aborted) return;
       preview.replaceChildren(errorBox(new Error(t('a.readError'))));
       return;
     }
-    pending = { name: file.name, content };
-    preview.replaceChildren(h('p', { class: 'field__hint' }, t('a.checking')));
+    if (generation !== checkGeneration || ctx.signal.aborted) return;
     try {
-      const res = await api.upload(kind, file.name, content, false);
-      renderPreview(res);
+      const res = await api.upload(checkedKind, file.name, content, false);
+      if (generation !== checkGeneration || ctx.signal.aborted) return;
+      renderPreview(res, { kind: checkedKind, name: file.name, content });
     } catch (err) {
+      if (generation !== checkGeneration || ctx.signal.aborted) return;
       if (err instanceof ApiError && err.status === 401) return ctx.onLogout(t('session.expired'));
       preview.replaceChildren(errorBox(err));
     }
@@ -166,13 +253,15 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
   /**
    * Показывает результат проверки загруженного файла.
    * @param res Обязательный ответ проверки; при успехе содержит сводку и может содержать замечания и разницу данных.
+   * @param file Обязательные тип, имя и текст именно того файла, который проверил сервер.
    * @returns void. Заменяет предпросмотр ошибкой или сводкой со сворачиваемыми замечаниями и действиями.
    * @remarks Сам рендер меняет только DOM. Кнопки позволяют очистить предпросмотр или применить
    * подготовленный файл. Применение выполняет запрос и показывает ошибку в предпросмотре.
    * Ошибки создания разметки распространяются.
    */
-  function renderPreview(res: UploadResponse) {
-    if (!res.ok || !res.summary) {
+  function renderPreview(res: UploadResponse, file: CheckedFile) {
+    const revision = res.revision;
+    if (!res.ok || !res.summary || !revision) {
       preview.replaceChildren(
         h('div', { class: 'alert alert--error', role: 'alert', 'data-testid': 'admin-invalid' }, icon('alert'), h('div', null, h('strong', null, t('a.invalid')), h('p', null, res.error ?? ''))),
       );
@@ -187,7 +276,7 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
         h(
           'div',
           null,
-          h('strong', null, `${t('a.valid')}: ${pending?.name ?? ''}`),
+          h('strong', null, `${t('a.valid')}: ${file.name}`),
           h(
             'p',
             null,
@@ -224,8 +313,9 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
         );
       }
       const list: Node[] = [];
-      if (d.changedFlights || !d.removedFlights) list.push(h('li', null, t('a.changed', { n: d.changedFlights })));
+      if (d.changedFlights || (!d.removedFlights && !d.changedRoutes?.length)) list.push(h('li', null, t('a.changed', { n: d.changedFlights })));
       if (d.removedFlights) list.push(h('li', null, t('a.removedFlights', { n: d.removedFlights })));
+      if (d.changedRoutes?.length) list.push(h('li', null, `${t('a.changedRoutes')}: ${d.changedRoutes.join(', ')}`));
       if (d.addedRoutes.length) list.push(h('li', null, `${t('a.added')}: ${d.addedRoutes.join(', ')}`));
       if (d.removedRoutes.length) list.push(h('li', null, `${t('a.removed')}: ${d.removedRoutes.join(', ')}`));
       nodes.push(
@@ -244,40 +334,46 @@ export async function renderAdmin(ctx: AppCtx, setMain: (main: HTMLElement) => v
       );
     }
     const apply = h('button', { type: 'button', class: 'btn', 'data-testid': 'admin-apply' }, t('a.apply'));
-    const cancel = h('button', { type: 'button', class: 'btn btn--ghost' }, t('a.cancel'));
+    const cancel = h('button', { type: 'button', class: 'btn btn--ghost', 'data-testid': 'admin-cancel' }, t('a.cancel'));
     cancel.addEventListener('click', () => {
+      checkGeneration++;
       pending = null;
       fileInput.value = '';
       preview.replaceChildren();
     });
-    apply.addEventListener('click', async () => {
-      if (!pending) return;
-      const appliedKind = kind;
-      apply.setAttribute('disabled', '');
-      apply.textContent = t('a.applying');
-      try {
-        const done = await api.upload(appliedKind, pending.name, pending.content, true);
-        if (done.applied) onDataChanged();
-        if (ctx.signal.aborted) return;
-        if (!done.ok) return renderPreview(done);
-        pending = null;
-        fileInput.value = '';
-        const routesApplied = appliedKind === 'routes';
-        preview.replaceChildren(h('div', { class: 'alert', role: 'status', 'data-testid': 'admin-applied' }, icon('check'), h('p', null, t(routesApplied ? 'a.routesApplied' : 'a.applied'))));
-        toast(t(routesApplied ? 'toast.routesUpdated' : 'toast.newData'));
-        await loadInfo();
-      } catch (err) {
-        preview.replaceChildren(errorBox(err));
-      }
+    apply.addEventListener('click', () => {
+      void mutate(async () => {
+        apply.textContent = t('a.applying');
+        await applyFile(file, revision);
+      });
     });
     nodes.push(h('div', { class: 'actions' }, apply, cancel));
     preview.replaceChildren(...nodes);
   }
 
+  /**
+   * Применяет файл с обязательными параметрами, использованными в проверке, и её ревизией.
+   * Возвращает Promise<void> после отображения результата и загрузки новых сведений.
+   * Успешная запись инвалидирует сохранённые рабочие экраны даже после ухода с формы.
+   * Конфликт и другие ошибки запроса передаёт mutate; повторного применения нет.
+   */
+  async function applyFile(file: CheckedFile, revision: string): Promise<void> {
+    const done = await api.upload(file.kind, file.name, file.content, true, revision);
+    if (done.applied) onDataChanged();
+    if (ctx.signal.aborted) return;
+    if (!done.ok) return renderPreview(done, file);
+    pending = null;
+    fileInput.value = '';
+    const routesApplied = file.kind === 'routes';
+    preview.replaceChildren(h('div', { class: 'alert', role: 'status', 'data-testid': 'admin-applied' }, icon('check'), h('p', null, t(routesApplied ? 'a.routesApplied' : 'a.applied'))));
+    toast(t(routesApplied ? 'toast.routesUpdated' : 'toast.newData'));
+    await loadInfo();
+  }
+
   for (const r of [kindForecast, kindRoutes]) {
     r.addEventListener('change', () => {
       kind = kindRoutes.checked ? 'routes' : 'forecast';
-      if (pending) void check(new File([pending.content], pending.name));
+      if (pending) void check(pending);
     });
   }
   fileInput.addEventListener('change', () => {

@@ -3,6 +3,7 @@
  * все направления на одну дату. Клик по строке или дуге открывает расчёт рейса.
  */
 import { api, ApiError, type BoardFlight, type BoardResponse } from '../api';
+import { matchesDataVersion, watchDataUpdates } from '../data-updates';
 import { h, icon } from '../dom';
 import { mountDatePicker } from '../controls/date-picker';
 import { fmtDateShort, fmtInt, fmtMoneyShort, fmtNum, fmtPct, fmtPrice } from '../format';
@@ -38,7 +39,8 @@ function writeBoardQuery(date: string, mode: BoardScreenState['mode']): void {
  * @returns Promise<void> после первой загрузки; последующие запускают обработчики контролов.
  * @remarks Читает снимок или URL, строит DOM и карту, подключает календарь и обработчики,
  * показывает сохранённый ответ при возврате, если он ещё доступен, и запрашивает актуальные данные API.
- * Повторяет запрос при возвращении на видимую вкладку браузера.
+ * Проверяет метаданные на видимой вкладке и перечитывает табло при обновлении.
+ * Повторяет запрос при возвращении на вкладку или восстановлении сети.
  * Список дат из ответа ограничивает ручной ввод и выбор в календаре; стрелки используют тот же список.
  * Меняет DOM и URL; новый запрос отменяет предыдущий, выход отменяет текущий запрос,
  * удаляет календарь и прекращает наблюдение за шириной таблицы.
@@ -119,6 +121,7 @@ export async function renderBoard(ctx: AppCtx, setMain: (main: HTMLElement) => v
   }
 
   let inflight: AbortController | null = null;
+  let checkingVersion = false;
   ctx.signal.addEventListener('abort', () => inflight?.abort(), { once: true });
 
   /**
@@ -161,6 +164,28 @@ export async function renderBoard(ctx: AppCtx, setMain: (main: HTMLElement) => v
         inflight = null;
         boardSlot.classList.remove('is-loading');
       }
+    }
+  }
+
+  /**
+   * Сверяет отрисованный снимок с текущими метаданными. Аргументов нет.
+   * @returns Promise<void> после проверки и возможной загрузки табло для выбранной даты и режима.
+   * @remarks Не прерывает запрос пользователя и пропускает параллельные проверки.
+   * После смены снимка или ошибки табло повторяет загрузку. При 401 завершает сеанс;
+   * остальные сбои фоновой проверки оставляют таблицу до следующей попытки.
+   */
+  async function checkVersion(): Promise<void> {
+    if (checkingVersion || inflight) return;
+    checkingVersion = true;
+    const displayed = last;
+    try {
+      const meta = await api.meta(ctx.signal);
+      if (ctx.signal.aborted || inflight || displayed !== last) return;
+      if (!displayed || !matchesDataVersion(displayed, meta.data) || errorSlot.hasChildNodes()) await load();
+    } catch (err) {
+      if (!ctx.signal.aborted && err instanceof ApiError && err.status === 401) ctx.onLogout(t('session.expired'));
+    } finally {
+      checkingVersion = false;
     }
   }
 
@@ -296,9 +321,10 @@ export async function renderBoard(ctx: AppCtx, setMain: (main: HTMLElement) => v
   }
 
   dateInput.addEventListener('input', applyDateInput, { signal: ctx.signal });
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') void load();
-  }, { signal: ctx.signal });
+  watchDataUpdates(ctx.signal, (resumed) => {
+    if (resumed) void load();
+    else void checkVersion();
+  });
   prev.addEventListener('click', () => shift(-1));
   next.addEventListener('click', () => shift(1));
   modeBase.addEventListener('click', () => {

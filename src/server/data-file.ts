@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { LocalizedError } from '../shared/messages.js';
 
 /** Асинхронно читает байты из обязательного открытого дескриптора; при ошибке отклоняет Promise, дескриптор не закрывает. */
 const readDescriptor = promisify(fs.readFile);
@@ -30,6 +31,22 @@ export function csvFilename(value: unknown, fallback: string): string {
  */
 export function dataFileVersionKey(stat: fs.BigIntStats): string {
   return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`;
+}
+
+/**
+ * Декодирует байты CSV как UTF-8, сохраняя начальный BOM для парсера.
+ * @param content Обязательные байты CSV, включая пустые.
+ * @param what Ключ перевода типа файла для сообщения об ошибке.
+ * @returns Строка UTF-8 без подстановки символов в повреждённых последовательностях.
+ * @throws {LocalizedError} Если байты не являются корректным UTF-8.
+ * @remarks Работает в памяти, не обращается к диску и не меняет переданный буфер.
+ */
+export function decodeDataFile(content: Buffer, what: 'what_routes' | 'what_forecast'): string {
+  try {
+    return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(content);
+  } catch {
+    throw new LocalizedError('file_invalid_encoding', { what });
+  }
 }
 
 /**
@@ -62,10 +79,12 @@ export function dataFileName(file: string, stat: fs.BigIntStats, content: Buffer
 }
 
 /**
- * Формирует переносимый ключ из обязательных байтов CSV. Возвращает SHA-256 с префиксом;
- * не обращается к диску, не меняет вход и не имеет ожидаемых ошибок.
+ * Формирует переносимую контрольную сумму CSV.
+ * @param content Обязательные байты CSV, включая пустые.
+ * @returns SHA-256 в шестнадцатеричной записи с префиксом sha256.
+ * @remarks Не обращается к диску, не меняет буфер и не имеет ожидаемых ошибок.
  */
-function digestKey(content: Buffer): string {
+export function dataFileDigest(content: Buffer): string {
   return `sha256:${createHash('sha256').update(content).digest('hex')}`;
 }
 
@@ -79,7 +98,7 @@ function digestKey(content: Buffer): string {
  * @remarks Не выполняет ввод-вывод и не имеет ожидаемых ошибок.
  */
 function resolveName(names: Record<string, unknown>, stat: fs.BigIntStats, content: Buffer, fallback: string): string {
-  return csvFilename(names[dataFileVersionKey(stat)] ?? names[digestKey(content)], fallback);
+  return csvFilename(names[dataFileVersionKey(stat)] ?? names[dataFileDigest(content)], fallback);
 }
 
 /**
@@ -146,7 +165,7 @@ export function repairPortableName(file: string): void {
   const key = dataFileVersionKey(version.stat);
   const name = names[key];
   if (typeof name !== 'string') return;
-  const digest = digestKey(version.content);
+  const digest = dataFileDigest(version.content);
   if (names[digest] === name) return;
   names[digest] = name;
   const namesPath = `${file}.names.json`;
@@ -167,7 +186,8 @@ export function repairPortableName(file: string): void {
  * @param fallback Настроенное имя при отсутствии метаданных.
  * @param beforePublish Необязательная подготовка резерва; получает точный ключ новой версии до замены CSV.
  * @returns void после замены CSV и обновления переносимых метаданных, если это возможно.
- * @remarks Пишет временные файлы рядом с целевыми. До замены CSV метаданные сохраняют имена обеих версий;
+ * @remarks Пишет временные файлы рядом с целевыми и синхронизирует их содержимое перед публикацией.
+ * До замены CSV метаданные сохраняют имена обеих версий;
  * при одинаковых байтах до замены переносимым остаётся старое имя. Ошибки до замены распространяются.
  * Ошибка уточнения переносимого имени после замены не отменяет публикацию: точный ключ уже записан.
  */
@@ -177,23 +197,23 @@ export function writeDataFile(file: string, content: Buffer, name: string, fallb
   const namesPath = `${file}.names.json`;
   const stagedNames = `${namesPath}${suffix}`;
   try {
-    fs.writeFileSync(staged, content, { flag: 'wx' });
+    fs.writeFileSync(staged, content, { flag: 'wx', flush: true });
     const previous = readDataFileIfPresent(file);
     const key = dataFileVersionKey(fs.statSync(staged, { bigint: true }));
-    const digest = digestKey(content);
+    const digest = dataFileDigest(content);
     const names: Record<string, string> = { [key]: name, [digest]: name };
     if (previous) {
       const previousName = dataFileName(file, previous.stat, previous.content, fallback);
       names[dataFileVersionKey(previous.stat)] = previousName;
-      names[digestKey(previous.content)] = previousName;
+      names[dataFileDigest(previous.content)] = previousName;
     }
-    fs.writeFileSync(stagedNames, JSON.stringify(names), { flag: 'wx' });
+    fs.writeFileSync(stagedNames, JSON.stringify(names), { flag: 'wx', flush: true });
     fs.renameSync(stagedNames, namesPath);
     beforePublish?.(key);
     fs.renameSync(staged, file);
     if (names[digest] !== name) {
       try {
-        fs.writeFileSync(stagedNames, JSON.stringify({ [key]: name, [digest]: name }), { flag: 'wx' });
+        fs.writeFileSync(stagedNames, JSON.stringify({ [key]: name, [digest]: name }), { flag: 'wx', flush: true });
         fs.renameSync(stagedNames, namesPath);
       } catch { /* Точный ключ новой версии уже доступен. */ }
     }

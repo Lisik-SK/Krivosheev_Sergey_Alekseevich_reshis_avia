@@ -32,12 +32,18 @@ export class CsvError extends LocalizedError {
   }
 }
 
-export function detectDelimiter(firstLine: string): Delimiter {
+/**
+ * Определяет разделитель по первой записи переданного текста CSV.
+ * @param firstRecordAndRest Текст с заголовка; может содержать следующие записи и переносы внутри кавычек.
+ * @returns Запятая, точка с запятой или табуляция; при равенстве действует указанный порядок.
+ * @remarks Не выполняет ввод-вывод и не выбрасывает ошибки для пустого или повреждённого текста.
+ */
+export function detectDelimiter(firstRecordAndRest: string): Delimiter {
   const candidates: Delimiter[] = [',', ';', '\t'];
   let best: Delimiter = ',';
   let bestCount = 0;
   for (const d of candidates) {
-    const count = splitOutsideQuotes(firstLine, d);
+    const count = countFirstRecordSeparators(firstRecordAndRest, d);
     if (count > bestCount) {
       best = d;
       bestCount = count;
@@ -46,23 +52,39 @@ export function detectDelimiter(firstLine: string): Delimiter {
   return best;
 }
 
-function splitOutsideQuotes(line: string, delimiter: string): number {
+/**
+ * Считает разделители вне кавычек в первой логической записи.
+ * @param text Текст CSV начиная с заголовка; пустая строка допустима.
+ * @param delimiter Один из поддерживаемых символов разделителя.
+ * @returns Неотрицательное число разделителей до первого переноса вне кавычек или конца текста.
+ * @remarks Не проверяет синтаксис кавычек, не выполняет ввод-вывод и не меняет вход.
+ */
+function countFirstRecordSeparators(text: string, delimiter: Delimiter): number {
   let count = 0;
   let inQuotes = false;
-  for (const ch of line) {
+  for (const ch of text) {
     if (ch === '"') inQuotes = !inQuotes;
-    else if (ch === delimiter && !inQuotes) count++;
+    else if (!inQuotes) {
+      if (ch === '\r' || ch === '\n') break;
+      if (ch === delimiter) count++;
+    }
   }
   return count;
 }
 
+/**
+ * Разбирает заголовок и записи CSV с запятой, точкой с запятой или табуляцией.
+ * @param input Обязательный текст CSV, может начинаться с BOM и строк из пробелов.
+ * @returns Таблица без пустых записей, с номерами первых физических строк каждой записи.
+ * @throws {CsvError} Если заголовка нет, кавычки не закрыты или после закрытия кавычек есть посторонние символы.
+ * @remarks Поддерживает CRLF, LF и CR; не проверяет схему таблицы, не меняет вход и не обращается к диску.
+ */
 export function parseCsv(input: string): CsvTable {
   let text = input;
   if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
 
-  const firstLineEnd = text.search(/\r?\n/);
-  const firstLine = firstLineEnd === -1 ? text : text.slice(0, firstLineEnd);
-  const delimiter = detectDelimiter(firstLine);
+  const blankPrefix = /^(?:[^\S\r\n]*(?:\r\n|\r|\n))*/.exec(text)?.[0] ?? '';
+  const delimiter = detectDelimiter(text.slice(blankPrefix.length));
 
   const records: Array<{ line: number; cells: string[] }> = [];
   let cells: string[] = [];
@@ -72,11 +94,13 @@ export function parseCsv(input: string): CsvTable {
   let line = 1;
   let recordLine = 1;
 
+  /** Завершает текущее поле, добавляет его в запись и очищает состояние разбора поля. */
   const pushField = () => {
     cells.push(fieldWasQuoted ? field : field.trim());
     field = '';
     fieldWasQuoted = false;
   };
+  /** Завершает текущую запись и добавляет её в таблицу, если хотя бы одно поле заполнено. */
   const pushRecord = () => {
     pushField();
     // Пустые строки и строки из одних разделителей (;;; из Excel) пропускаем.
@@ -97,22 +121,24 @@ export function parseCsv(input: string): CsvTable {
           inQuotes = false;
         }
       } else {
-        if (ch === '\n') line++;
+        if (ch === '\n' || (ch === '\r' && text[i + 1] !== '\n')) line++;
         field += ch;
       }
       continue;
     }
-    if (ch === '"' && field.trim() === '') {
-      inQuotes = true;
-      fieldWasQuoted = true;
-      field = '';
-    } else if (ch === delimiter) {
+    if (ch === delimiter) {
       pushField();
     } else if (ch === '\n' || ch === '\r') {
       if (ch === '\r' && text[i + 1] === '\n') i++;
       pushRecord();
       line++;
       recordLine = line;
+    } else if (fieldWasQuoted) {
+      if (ch.trim() !== '') throw new CsvError('csv_quote_suffix', {}, recordLine);
+    } else if (ch === '"' && field.trim() === '') {
+      inQuotes = true;
+      fieldWasQuoted = true;
+      field = '';
     } else {
       field += ch;
     }

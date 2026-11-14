@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { Page } from '@playwright/test';
+import { uploadDataset } from './support/admin-data';
 import { test, expect, loginAdmin, registerViaApi, settled, waitForecast, textOf } from './support/fixtures';
 import { expected, num1 } from './support/data';
 
@@ -31,12 +32,12 @@ async function wantsFor(page: Page, query: string): Promise<string> {
   return textOf(page, 'wants');
 }
 
-/** Гарантированно вернуть исходный файл прогноза (через API администратора). */
+/**
+ * Восстанавливает исходный CSV через API тестовой сессии администратора из обязательной страницы.
+ * Возвращает Promise<void> после применения; ошибки проверки и записи отклоняют Promise.
+ */
 async function restoreOriginal(page: Page) {
-  const res = await page.request.post('/api/admin/upload', {
-    data: { kind: 'forecast', filename: 'seasonal_forecast.csv', content: ORIGINAL_FORECAST, apply: true },
-  });
-  expect(res.ok(), await res.text()).toBe(true);
+  await uploadDataset(page.request, 'forecast', ORIGINAL_FORECAST);
 }
 
 test.describe('Администрирование данных', () => {

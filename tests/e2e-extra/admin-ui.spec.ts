@@ -6,7 +6,7 @@
 import { readFile } from 'node:fs/promises';
 import type { APIRequestContext, Page } from '@playwright/test';
 import { test, expect, loginAdmin, numberOf, settled } from '../e2e/support/fixtures';
-import { ORIGINAL, adminApi, patchedRoutes, restoreDataOnDisk, uploadApply, wantsViaApi } from './support/extra';
+import { ORIGINAL, adminApi, patchedForecast, patchedRoutes, restoreDataOnDisk, uploadApply, wantsViaApi } from './support/extra';
 
 let api: APIRequestContext;
 
@@ -45,7 +45,7 @@ test('скачивание текущих CSV сохраняет имена по
   await expectDownload('forecast', 'seasonal_forecast.csv', ORIGINAL.forecast);
   await expectDownload('routes', 'routes.csv', ORIGINAL.routes);
 
-  const replacement = patchedRoutes('0.2');
+  const replacement = '\uFEFF' + patchedRoutes('0.2');
   const replacementName = 'Маршруты (июнь).csv';
   await page.getByLabel('Справочник маршрутов', { exact: true }).check();
   await chooseFile(page, replacementName, replacement);
@@ -58,6 +58,145 @@ test('скачивание текущих CSV сохраняет имена по
   await page.getByTestId('restore-routes').click();
   await expect(page.getByTestId('admin-current').getByText('routes.csv', { exact: true })).toBeVisible();
   await expectDownload('routes', 'routes.csv', ORIGINAL.routes);
+});
+
+test('очень быстрые нажатия выполняют один откат, даже если подтверждение задержалось', async ({ page }) => {
+  await uploadApply(api, 'forecast', patchedForecast({ '0.5_base_demand': '850' }), 'burst.csv');
+  await openAdmin(page);
+  const restore = page.getByTestId('restore-forecast');
+  let restoreCalls = 0;
+  page.on('request', (request) => {
+    if (request.url().endsWith('/api/admin/restore')) restoreCalls++;
+  });
+
+  let releaseRestore!: () => void;
+  let writeCompleted!: (status: number) => void;
+  const gate = new Promise<void>((resolve) => { releaseRestore = resolve; });
+  const written = new Promise<number>((resolve) => { writeCompleted = resolve; });
+  await page.route('**/api/admin/restore', async (route) => {
+    const response = await route.fetch();
+    writeCompleted(response.status());
+    await gate;
+    await route.fulfill({ response });
+  }, { times: 1 });
+
+  try {
+    await restore.evaluate((button) => {
+      for (let i = 0; i < 20; i++) button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(await written).toBe(200);
+    await expect(restore).toBeDisabled();
+    expect(restoreCalls).toBe(1);
+    // Проверяет второе нажатие уже по новой кнопке с новой ревизией.
+    const earlyClick = page.getByTestId('admin-current').evaluate((current) => new Promise<boolean>((resolve) => {
+      const clickUpdated = () => {
+        if (!current.textContent?.includes('seasonal_forecast.csv')) return;
+        observer.disconnect();
+        const updated = current.querySelector<HTMLButtonElement>('[data-testid="restore-forecast"]')!;
+        updated.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        resolve(updated.disabled);
+      };
+      const observer = new MutationObserver(clickUpdated);
+      observer.observe(current, { childList: true });
+      clickUpdated();
+    }));
+    releaseRestore();
+    expect(await earlyClick).toBe(true);
+  } finally {
+    releaseRestore();
+  }
+  await expect(page.getByTestId('admin-current')).toContainText('seasonal_forecast.csv');
+  expect(await wantsViaApi(api, 9000)).toBe(775);
+  expect(restoreCalls).toBe(1);
+  await restore.click();
+  await expect(page.getByTestId('admin-current')).toContainText('burst.csv');
+  expect(await wantsViaApi(api, 9000)).toBe(850);
+  expect(restoreCalls).toBe(2);
+});
+
+test('устаревший откат из другой сессии не меняет файлы и перечитывает сведения', async ({ page, problems }) => {
+  await uploadApply(api, 'forecast', patchedForecast({ '0.5_base_demand': '850' }), 'middle.csv');
+  await openAdmin(page);
+  await expect(page.getByTestId('admin-current')).toContainText('middle.csv');
+  await uploadApply(api, 'forecast', patchedForecast({ '0.5_base_demand': '800' }), 'latest.csv');
+  problems.allow(/409|CONFLICT/i);
+
+  const conflict = page.waitForResponse((response) => response.url().endsWith('/api/admin/restore'));
+  await page.getByTestId('restore-forecast').click();
+  expect((await conflict).status()).toBe(409);
+  await expect(page.getByTestId('admin-preview').getByRole('alert')).toBeVisible();
+  await expect(page.getByTestId('admin-current')).toContainText('latest.csv');
+  expect(await wantsViaApi(api, 9000)).toBe(800);
+});
+
+test('устаревшее подтверждение требует заново проверить тот же файл', async ({ page, problems }) => {
+  await openAdmin(page);
+  const candidate = patchedForecast({ '0.5_base_demand': '850' });
+  const preview = page.getByTestId('admin-valid');
+  const apply = page.getByTestId('admin-apply');
+  await chooseFile(page, 'candidate.csv', candidate);
+  await expect(preview).toBeVisible();
+
+  await uploadApply(api, 'routes', patchedRoutes('0.2'));
+  problems.allow(/409|CONFLICT/i);
+  const conflict = page.waitForResponse((response) => response.url().endsWith('/api/admin/upload'));
+  await apply.click();
+  expect((await conflict).status()).toBe(409);
+  await expect(page.getByTestId('admin-preview').getByRole('alert')).toBeVisible();
+  await expect(apply).toHaveCount(0);
+  await expect(page.getByTestId('admin-file')).toHaveValue('');
+  expect(await wantsViaApi(api, 9000)).toBe(775);
+
+  await chooseFile(page, 'candidate.csv', candidate);
+  await expect(preview).toContainText('candidate.csv');
+  await apply.click();
+  await expect(page.getByTestId('admin-current')).toContainText('candidate.csv');
+  expect(await wantsViaApi(api, 9000)).toBe(850);
+});
+
+test('запоздалая проверка одного файла не подменяет предпросмотр следующего', async ({ page }) => {
+  await openAdmin(page);
+  let releasePreview!: () => void;
+  let previewChecked!: () => void;
+  const gate = new Promise<void>((resolve) => { releasePreview = resolve; });
+  const checked = new Promise<void>((resolve) => { previewChecked = resolve; });
+  await page.route('**/api/admin/upload', async (route) => {
+    const response = await route.fetch();
+    previewChecked();
+    await gate;
+    await route.fulfill({ response });
+  }, { times: 1 });
+
+  try {
+    await chooseFile(page, 'first.csv', patchedForecast({ '0.5_base_demand': '850' }));
+    await checked;
+    await chooseFile(page, 'second.csv', patchedForecast({ '0.5_base_demand': '800' }));
+    await expect(page.getByTestId('admin-valid')).toContainText('second.csv');
+    const late = page.waitForResponse((response) => response.url().endsWith('/api/admin/upload')
+      && response.request().postDataJSON().filename === 'first.csv');
+    releasePreview();
+    expect((await late).ok()).toBe(true);
+    await expect(page.getByTestId('admin-valid')).toContainText('second.csv');
+    await page.getByTestId('admin-apply').click();
+    await expect(page.getByTestId('admin-current')).toContainText('second.csv');
+    expect(await wantsViaApi(api, 9000)).toBe(800);
+  } finally {
+    releasePreview();
+  }
+});
+
+test('некорректный UTF-8 не превращается в изменённый текст для загрузки', async ({ page }) => {
+  await openAdmin(page);
+  let uploads = 0;
+  page.on('request', (request) => {
+    if (request.url().endsWith('/api/admin/upload')) uploads++;
+  });
+  await page.getByTestId('admin-file').setInputFiles({
+    name: 'encoding.csv', mimeType: 'text/csv', buffer: Buffer.from([0xc3, 0x28]),
+  });
+  await expect(page.getByTestId('admin-preview').getByRole('alert')).toContainText('Не удалось прочитать файл');
+  await expect(page.getByTestId('admin-apply')).toHaveCount(0);
+  expect(uploads).toBe(0);
 });
 
 test('смена направления доступна только на дату обратного рейса', async ({ page }) => {
@@ -299,6 +438,7 @@ test.describe('Экран «Данные»: справочник маршрут�
     // Чувствительность MOW-AER 0.141 → 0.2: при цене 9500 хотят 775 − 0.2 × 500 = 675
     await chooseFile(page, 'routes.csv', patchedRoutes('0.2'));
     await expect(page.getByTestId('admin-valid')).toBeVisible();
+    await expect(page.getByTestId('admin-diff')).toContainText('Изменятся параметры маршрутов: MOW-AER');
     expect(await wantsViaApi(api), 'до подтверждения данные не меняются').toBe(704.5);
 
     await page.getByTestId('admin-apply').click();

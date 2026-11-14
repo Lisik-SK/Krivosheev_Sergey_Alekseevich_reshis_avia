@@ -3,6 +3,7 @@ import { api, ApiError, type CurveResponse, type ForecastResponse, type Meta, ty
 import { renderCalendar } from '../calendar';
 import { DemandChart } from '../chart';
 import { ProfitCurveChart } from '../curve';
+import { matchesDataVersion, watchDataUpdates } from '../data-updates';
 import { mountDatePicker } from '../controls/date-picker';
 import { flightCities, flightDates } from '../controls/flight-options';
 import { mountSelectPicker } from '../controls/select-picker';
@@ -262,6 +263,8 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
   let inflight: AbortController | null = null;
   let debounce: ReturnType<typeof setTimeout> | null = null;
   let last: FlightResult | null = null;
+  let metaRefresh: Promise<boolean> | null = null;
+  let refreshCalculation = false;
   const editedPrices = new Set<HTMLInputElement>();
   const curveCache = new Map<string, CurveResponse>();
   const monthCache = new Map<string, MonthResponse>();
@@ -623,13 +626,15 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
   /**
    * Сохраняет выбор и рассчитывает прогноз для готовой формы.
    * @param keepCurvePosition При true сохраняет позицию кривой после рендера; по умолчанию false.
+   * @param retryVersion При true допускает один повтор при несовпадении снимков; по умолчанию true.
    * @returns Promise<void> после обработки текущего расчёта или сразу при неполной форме.
    * @remarks Отменяет прежний таймер и запрос, записывает параметры и валидирует форму. Для готовой формы
    * загружает прогнозы, кривую и загрузку по дням параллельно, используя кеш версии данных.
-   * Успех обновляет DOM, кеш и планирует запись в историю. Отменённые ответы игнорирует;
+   * При несовпадении обновляет метаданные и передаёт повтор обновлению или выполняет его один раз.
+   * Целостный результат обновляет DOM, кеш и планирует запись в историю. Отменённые ответы игнорирует;
    * ошибки API отображает либо завершает сессию, при 404 обновляет метаданные. Ошибки записи адреса распространяются.
    */
-  async function run(keepCurvePosition = false) {
+  async function run(keepCurvePosition = false, retryVersion = true) {
     if (debounce) clearTimeout(debounce);
     debounce = null;
     inflight?.abort();
@@ -637,6 +642,7 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
     const q = readQuery();
     writeUrlQuery(q, comparisonState());
     if (!validate(q)) {
+      refreshCalculation = false;
       ctx.history.cancelPendingSave();
       clearResult();
       return;
@@ -655,17 +661,26 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
         monthCache.get(monthKey) ?? api.month({ from: q.from, to: q.to, price }, ac.signal),
       ]);
       if (ac.signal.aborted || ctx.signal.aborted) return;
+      if (![a, b, curve, month].every((response) => response === null || matchesDataVersion(response, meta.data))) {
+        const changed = await refreshMeta();
+        if (!changed && retryVersion && !ac.signal.aborted && !ctx.signal.aborted) {
+          curveCache.delete(curveKey);
+          monthCache.delete(monthKey);
+          await run(keepCurvePosition, false);
+        }
+        return;
+      }
       curveCache.set(curveKey, curve);
       monthCache.set(monthKey, month);
       last = { a, b, curve, month };
       renderResult(keepCurvePosition);
+      refreshCalculation = false;
       ctx.history.scheduleSave({ from: q.from, to: q.to, date: q.date, price });
-      if (a.dataVersion !== meta.data.version) void refreshMeta(true);
     } catch (err) {
       if (ac.signal.aborted || (err as Error).name === 'AbortError' || ctx.signal.aborted) return;
       if (err instanceof ApiError) {
         if (err.status === 401) return ctx.onLogout(t('session.expired'));
-        if (err.status === 404) void refreshMeta(true);
+        if (err.status === 404) void refreshMeta();
         if (Object.keys(err.fields).length) showFieldErrors(err.fields);
         showFormError(err.message);
       } else {
@@ -693,17 +708,27 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
   }
 
   /**
-   * Загружает актуальные метаданные для формы и её справочника.
-   * @param announce true для показа уведомления при изменении данных, иначе false.
-   * @returns Promise<void> после обновления, отмены или обработки ошибки запроса.
-   * @remarks Использует сигнал экрана; при новой версии очищает кеш, восстанавливает доступные города,
-   * обновляет элементы управления и планирует расчёт. При совпадении версий обновляет цену модели,
-   * чтобы её можно было получить после восстановления старого снимка. При 401 завершает сессию; прочие сбои игнорирует.
+   * Переиспользует текущую проверку метаданных. Аргументов нет.
+   * @returns Promise с true, если проверка сменила версию; остальные исходы дают false.
+   * @remarks Допускает только один запрос проверки одновременно для этого экрана.
+   * Ошибки обрабатывает загрузка метаданных; после завершения следующий вызов может повторить запрос.
    */
-  async function refreshMeta(announce: boolean) {
+  function refreshMeta(): Promise<boolean> {
+    return metaRefresh ??= loadMeta().finally(() => { metaRefresh = null; });
+  }
+
+  /**
+   * Загружает актуальные метаданные для формы и её справочника. Аргументов нет.
+   * @returns Promise с true при переходе на новую версию и false при прежней версии, отмене или сбое.
+   * @remarks Использует сигнал экрана; при новой версии очищает кеш, восстанавливает доступные города,
+   * обновляет элементы управления и планирует расчёт. При совпадении версий обновляет цену модели;
+   * если ещё нет успешного расчёта для обновлённых данных, повторяет его при свободной форме.
+   * При 401 завершает сессию; прочие сбои запроса метаданных игнорирует.
+   */
+  async function loadMeta(): Promise<boolean> {
     try {
       const next = await api.meta(ctx.signal);
-      if (ctx.signal.aborted) return;
+      if (ctx.signal.aborted) return false;
       const previousData = meta.data;
       const changed = next.data.version !== previousData.version || next.data.loadedAt !== previousData.loadedAt;
       meta = next;
@@ -715,14 +740,18 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
         fillCities(fromSel, 'origin', keep.from);
         fillCities(toSel, 'destination', keep.to);
         syncRouteControls();
-        if (announce) toast(t(dataUpdateNotice(previousData.source, next.data.source)));
+        toast(t(dataUpdateNotice(previousData.source, next.data.source)));
+        refreshCalculation = true;
         schedule(0);
       } else {
         syncModelPriceButtons();
+        if (refreshCalculation && !inflight && !debounce) schedule(0);
       }
+      return changed;
     } catch (err) {
-      if ((err as Error).name === 'AbortError' || ctx.signal.aborted) return;
+      if ((err as Error).name === 'AbortError' || ctx.signal.aborted) return false;
       if (err instanceof ApiError && err.status === 401) ctx.onLogout(t('session.expired'));
+      return false;
     }
   }
 
@@ -1051,13 +1080,7 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
   compareToggle.addEventListener('keydown', activateCompareOnEnter);
   compareToggle.addEventListener('change', updateComparison);
   form.addEventListener('submit', (e) => e.preventDefault());
-  document.addEventListener(
-    'visibilitychange',
-    () => {
-      if (document.visibilityState === 'visible') void refreshMeta(true);
-    },
-    { signal: ctx.signal },
-  );
+  watchDataUpdates(ctx.signal, () => void refreshMeta());
   document.addEventListener(
     'themechange',
     () => {
@@ -1095,15 +1118,15 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
     comparisonPrice: priceBInput.value, comparing: compareToggle.checked, chartMode, result: last,
   }));
 
-  if (restored?.meta) void refreshMeta(true);
+  if (restored?.meta) void refreshMeta();
   const result = restored?.result;
   const query = readQuery();
   if (result && validate(query) && result.a.route.code === currentRoute()?.code && result.a.date === query.date
-    && result.a.dataVersion === meta.data.version && result.curve.dataVersion === meta.data.version
-    && result.month.dataVersion === meta.data.version && result.a.price === Number(query.price)
+    && matchesDataVersion(result.a, meta.data) && matchesDataVersion(result.curve, meta.data)
+    && matchesDataVersion(result.month, meta.data) && result.a.price === Number(query.price)
     && (query.priceB === null
       ? result.b === null
-      : result.b?.price === Number(query.priceB) && result.b.dataVersion === meta.data.version)) {
+      : result.b?.price === Number(query.priceB) && matchesDataVersion(result.b, meta.data))) {
     last = result;
     writeUrlQuery(query, comparisonState());
     renderResult(false);
