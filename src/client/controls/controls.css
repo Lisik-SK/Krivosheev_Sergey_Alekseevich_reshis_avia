@@ -1,0 +1,195 @@
+/* Поля повторяют размеры, поверхности, границы и акцент существующих карточек и кнопок. */
+.picker-field {
+  position: relative;
+  min-width: 0;
+  width: 100%;
+}
+.query__date > .picker-field {
+  flex: 1;
+}
+.picker-trigger {
+  display: block;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Кнопка списка сохраняет оговорённое поведение: без акцентной окантовки при Shift+клике. */
+:root[data-focus-input='pointer'] .picker-trigger:focus {
+  box-shadow: none;
+}
+:root[data-focus-input='pointer'] .picker-trigger:focus:not([aria-invalid='true']) {
+  border-color: var(--line-strong);
+}
+.picker-popup {
+  position: fixed;
+  z-index: 1100;
+  top: 0;
+  left: 0;
+  padding: 6px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-2);
+}
+.picker-option {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.picker-option:hover:not(:disabled),
+.date-picker__day:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+.picker-option.is-selected {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+.picker-option:disabled {
+  color: var(--ink-3);
+  opacity: 0.5;
+  cursor: default;
+}
+.picker-option:focus-visible,
+.date-picker__day:focus-visible {
+  outline-offset: -2px;
+}
+.date-field__input {
+  padding-right: 44px;
+}
+.date-field__trigger {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+}
+.date-picker .icon-btn:disabled,
+.date-field__trigger:disabled {
+  opacity: 0.5;
+  cursor: default;
+  background: transparent;
+}
+.date-picker {
+  padding: 12px;
+}
+.date-picker__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.date-picker__title {
+  font-weight: 600;
+  text-align: center;
+}
+.date-picker__grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 4px;
+}
+.date-picker__weekday {
+  padding-bottom: 4px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: center;
+  text-transform: uppercase;
+}
+.date-picker__day,
+.date-picker__empty {
+  min-width: 0;
+  min-height: 36px;
+}
+.date-picker__day {
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  cursor: pointer;
+}
+.date-picker__day.is-selected,
+.date-picker__day.is-selected:hover {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.date-picker__day:disabled {
+  color: var(--ink-3);
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Нативная семантика ползунков и радиокнопок сохраняется; внешний вид един во всех браузерах. */
+.price-slider {
+  appearance: none;
+  background: transparent;
+}
+.price-slider::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: var(--r-sm);
+  background: var(--line-strong);
+}
+.price-slider::-moz-range-track {
+  height: 6px;
+  border-radius: var(--r-sm);
+  background: var(--line-strong);
+}
+.price-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.price-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.radio input {
+  appearance: none;
+  flex: none;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+}
+.radio input:checked {
+  border-color: var(--accent);
+  background: radial-gradient(circle, var(--accent) 0 4px, transparent 4px), var(--surface);
+}
+:root[data-focus-input='pointer'] :is(.radio input, .price-slider):focus {
+  outline: none;
+}
+
+@media (forced-colors: active) {
+  .price-slider,
+  .radio input {
+    appearance: auto;
+  }
+  .picker-option.is-selected,
+  .date-picker__day.is-selected {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}

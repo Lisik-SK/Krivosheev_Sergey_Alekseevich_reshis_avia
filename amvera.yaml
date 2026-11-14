@@ -1,0 +1,5 @@
+run:
+  containerPort: 3000
+  persistenceMount: /data
+  command: /bin/sh
+  args: /app/deploy/amvera-start.sh

@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Решись Авиа: прогноз продаж билетов по рейсам" />
+    <meta name="theme-color" content="#f3f5f6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0f1417" media="(prefers-color-scheme: dark)" />
+    <title>Прогноз продаж · Решись Авиа</title>
+    <link rel="icon" href="/favicon.svg?v=forecast" type="image/svg+xml" />
+    <!-- Тема ставится до отрисовки, чтобы не мигал светлый экран. Отдельный файл, т.к. CSP запрещает inline-скрипты. -->
+    <script src="/theme-init.js"></script>
+  </head>
+  <body>
+    <div id="app">
+      <div class="boot" role="status">
+        <span class="boot__dot"></span>
+        <span>Загрузка…</span>
+      </div>
+    </div>
+    <noscript>
+      <p class="noscript">Для работы прогноза нужен JavaScript. Включите его в настройках браузера.</p>
+    </noscript>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

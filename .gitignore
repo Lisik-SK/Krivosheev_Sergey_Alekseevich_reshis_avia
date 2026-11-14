@@ -1,0 +1,26 @@
+node_modules/
+dist/
+storage/
+coverage/
+test-results/
+playwright-report/
+blob-report/
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.zip
+.DS_Store
+Thumbs.db
+playwright-report-extra/
+test-results-*/
+e2e-*-storage/
+e2e-*-data/
+tests/**/__screenshots__/
+
+# Локальные резервные копии и имена загруженных наборов данных.
+/data/*.bak
+/data/*.names.json

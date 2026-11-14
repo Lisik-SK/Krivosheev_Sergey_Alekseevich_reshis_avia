@@ -1,0 +1,47 @@
+{
+  "name": "reshis-avia-forecast",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Решись Авиа: прогноз продаж билетов по рейсам (веб-интерфейс + backend API + CLI)",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch --clear-screen=false src/server/index.ts",
+    "dev:client": "vite",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning dist/node/server/index.js",
+    "forecast:built": "node dist/node/cli/forecast.js",
+    "forecast": "tsx src/cli/forecast.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:all": "npm run typecheck && npm test && npm run build && npm run test:e2e"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/helmet": "^13.2.0",
+    "@fastify/rate-limit": "^11.2.2",
+    "@fastify/static": "^10.1.10",
+    "fastify": "^5.12.8"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.14.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
+    "@playwright/test": "^1.65.0",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^5.1.0",
+    "concurrently": "^10.0.7",
+    "fast-check": "^4.10.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
+  }
+}

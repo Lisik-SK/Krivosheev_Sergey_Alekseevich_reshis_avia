@@ -1,0 +1,203 @@
+# Деплой
+
+Приложение — один процесс Node.js. Он отдаёт и страницу, и API; внешняя база не нужна.
+Для работы нужны Node.js 22.13+ (или Docker), открытый порт и постоянный диск для папки `storage/` с базой пользователей.
+
+## Какой хостинг выбрать
+
+В условии рекомендован виртуальный хостинг TimeWeb. Однако, согласно
+[документации TimeWeb](https://timeweb.com/ru/docs/virtualnyj-hosting/prilozheniya-i-frejmvorki/ispolzovanie-node-js-i-npm/),
+на виртуальном хостинге Node.js работает только как консольная утилита: запустить его как веб-сервер там нельзя.
+Для варианта C (страница + backend) подходят:
+
+1. **TimeWeb Cloud → Apps** (деплой из GitHub по Dockerfile). Самый простой путь, см. раздел 1.
+2. **Облачный сервер (VPS)** TimeWeb Cloud или любой другой с Ubuntu 24.04, см. раздел 2.
+3. Любая PaaS, которая собирает Dockerfile (Render, Railway, Fly.io, Amvera и т. п.), см. раздел 3.
+
+## Amvera Cloud
+
+1. Создайте проект типа «Приложение» с одной репликой. Загрузите исходники так, чтобы `Dockerfile` и `amvera.yaml` лежали в корне проекта. Используйте встроенный Git Amvera или загрузку файлов через панель.
+2. До подключения публичного домена задайте `INITIAL_ADMIN_EMAIL` и секрет `INITIAL_ADMIN_PASSWORD` в разделе «Переменные». Первый запуск создаст владельца с ролью администратора. При следующих запусках существующий аккаунт сохранится. Регистрация для проверяющих открыта по умолчанию.
+3. Запустите сборку. `amvera.yaml` направляет запросы на порт `3000`, а `deploy/amvera-start.sh` создаёт базу в `/data/storage` и копирует исходные CSV в `/data/forecast`, если их там ещё нет. Файлы, заменённые через экран «Данные», сохраняются на томе.
+4. Добавьте бесплатный домен Amvera с HTTPS и дождитесь готовности сертификата. Проверьте `/api/health` и зарегистрируйте обычный аккаунт через форму в приватном окне. Убедитесь, что доступны прогноз и график, затем проверьте вход владельца и раздел «Данные».
+
+Документация: [первый запуск](https://docs.amvera.ru/applications/quick-start.html), [Docker](https://docs.amvera.ru/applications/configuration/docker.html), [постоянное хранилище](https://docs.amvera.ru/applications/storage.html).
+
+## Команды
+
+| Что | Команда |
+|---|---|
+| Установка зависимостей | `npm ci` |
+| Сборка (клиент + сервер) | `npm run build` |
+| Запуск | `npm start` |
+| Проверка, что сервис жив | `curl http://127.0.0.1:3000/api/health` |
+| Сборка Docker-образа | `docker build -t reshis-avia .` |
+| Запуск контейнера | `docker run -d -p 3000:3000 -v reshis-storage:/app/storage --name reshis-avia reshis-avia` |
+
+`npm start` запускает `dist/node/server/index.js` с флагом `--env-file-if-exists=.env`: файл `.env` подхватывается, если он есть.
+Переменные окружения, заданные хостингом, имеют приоритет над значениями из `.env`.
+
+## Переменные окружения
+
+Все переменные необязательны: без них приложение работает с настройками по умолчанию.
+Секретных ключей задавать не нужно: сессии — это случайные токены в базе, cookie не подписываются.
+
+Для доступа к разделу «Данные» задайте обе переменные владельца до запуска.
+Если владелец уже создан, приложение использует его аккаунт из базы. Для
+первичной настройки укажите свободный email и пароль от 8 символов с буквами и цифрами.
+При локальном запуске заполните `.env`, для ручного запуска Docker передайте его через `--env-file .env`.
+
+| Переменная | По умолчанию | Назначение |
+|---|---|---|
+| `NODE_ENV` | `development` | На хостинге — `production` |
+| `PORT` | `3000` | Порт HTTP-сервера |
+| `HOST` | `0.0.0.0` | Адрес. На VPS за nginx — `127.0.0.1` |
+| `TRUST_PROXY` | `false` | Укажите адрес или подсеть доверенного прокси. Для nginx на том же VPS подходит `loopback`. Fastify принимает `X-Forwarded-*` от доверенного адреса. Amvera использует `loopback,uniquelocal` для своего внутреннего прокси |
+| `COOKIE_SECURE` | `auto` | `auto` — флаг Secure ставится при HTTPS; `true` — всегда, плюс заголовок HSTS; `false` — никогда (только для работы по HTTP без TLS) |
+| `DATA_DIR` | `data` | Папка с `seasonal_forecast.csv` и `routes.csv` |
+| `FORECAST_PATH` | `$DATA_DIR/seasonal_forecast.csv` | Путь к файлу прогноза, например `data/Иванов_my_forecast.csv` |
+| `ROUTES_PATH` | `$DATA_DIR/routes.csv` | Путь к справочнику маршрутов |
+| `DATA_CHECK_INTERVAL_MS` | `2000` | Минимальный интервал (мс) между проверками CSV на замену. Проверка идёт при запросах, а не по таймеру |
+| `STORAGE_DIR` | `storage` | Папка с базой SQLite (аккаунты, сессии) |
+| `DB_PATH` | `$STORAGE_DIR/app.db` | Полный путь к файлу базы |
+| `ALLOW_REGISTRATION` | `true` | `false` — закрыть регистрацию после создания нужных аккаунтов |
+| `SESSION_TTL_HOURS` | `168` | Срок жизни сессии в часах |
+| `AUTH_RATE_LIMIT` | `10` | Лимит попыток входа и регистрации с одного IP в минуту |
+| `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_PASSWORD` | — | Создают владельца, если в базе ещё нет администратора. Задавайте пароль через секрет хостинга |
+| `UPLOAD_MAX_MB` | `5` | Максимальный размер CSV, который администратор загружает на экране «Данные» |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, `silent` |
+
+Относительные пути считаются от корня проекта.
+
+Рекомендуемый набор для продакшена за HTTPS-прокси хостинга:
+
+```
+NODE_ENV=production
+PORT=3000
+TRUST_PROXY=loopback
+COOKIE_SECURE=auto
+```
+
+---
+
+## 1. TimeWeb Cloud → Apps (Dockerfile)
+
+1. Загрузите проект в репозиторий GitHub. Файлы `.gitignore` и `.dockerignore` уже настроены.
+2. В панели TimeWeb Cloud: **Apps → Создать → Docker**, подключите GitHub и выберите репозиторий и ветку.
+3. Настройки:
+   - способ сборки: **Dockerfile** из корня репозитория;
+   - порт приложения: **3000**;
+   - переменные окружения: `NODE_ENV=production`, `COOKIE_SECURE=true`, `INITIAL_ADMIN_EMAIL` и секрет `INITIAL_ADMIN_PASSWORD`. Если требуется читать `X-Forwarded-*`, укажите адрес или подсеть прокси платформы в `TRUST_PROXY`;
+   - путь для проверки работоспособности (health check), если панель его запрашивает: `/api/health`.
+4. Запустите деплой. Когда сборка закончится, откройте выданный домен и зарегистрируйтесь.
+
+Аккаунты хранятся в `/app/storage` внутри контейнера. Если платформа не даёт постоянный диск,
+при каждом новом деплое база создаётся заново и пользователям придётся зарегистрироваться ещё раз;
+прогноз при этом работает как обычно. Чтобы аккаунты сохранялись между деплоями, используйте VPS (раздел 2).
+
+Названия пунктов в панели TimeWeb со временем меняются. Если пункт называется иначе, ищите по смыслу:
+сборка по Dockerfile, порт 3000, переменные окружения.
+
+## 2. VPS (Ubuntu 24.04, nginx, HTTPS)
+
+Подключитесь по SSH и выполните команды по порядку.
+
+```bash
+# 1. Node.js 24 и nginx
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
+sudo apt-get install -y nodejs nginx git
+node -v            # должно быть v24.x
+
+# 2. Пользователь и код
+sudo useradd -r -m -d /opt/reshis-avia -s /usr/sbin/nologin reshis
+sudo git clone https://github.com/<ваш-логин>/<репозиторий>.git /opt/reshis-avia/app
+#   (или распакуйте reshis-avia.zip в /opt/reshis-avia/app)
+sudo chown -R reshis:reshis /opt/reshis-avia
+cd /opt/reshis-avia/app
+
+# 3. Сборка
+sudo -u reshis npm ci
+sudo -u reshis npm run build
+sudo -u reshis npm prune --omit=dev
+
+# 4. Служба systemd
+sudo cp deploy/reshis-avia.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now reshis-avia
+curl http://127.0.0.1:3000/api/health
+
+# 5. nginx (замените forecast.example.ru на свой домен в файле)
+sudo cp deploy/nginx.conf /etc/nginx/sites-available/reshis-avia
+sudo ln -s /etc/nginx/sites-available/reshis-avia /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+# 6. HTTPS (Let's Encrypt)
+sudo apt-get install -y certbot python3-certbot-nginx
+sudo certbot --nginx -d forecast.example.ru
+```
+
+Перед запуском systemd на шаге 4 добавьте `EnvironmentFile` с настройками владельца в конфигурацию службы.
+Перед шагом 6 A-запись домена должна указывать на IP сервера.
+
+Если привычнее PM2, вместо шага 4 подойдёт `deploy/ecosystem.config.cjs`:
+`sudo npm i -g pm2 && sudo -u reshis pm2 start deploy/ecosystem.config.cjs && sudo -u reshis pm2 save`,
+а для автозапуска после перезагрузки выполните `pm2 startup` и команду, которую он выведет.
+
+Обновление версии:
+
+```bash
+cd /opt/reshis-avia/app
+sudo -u reshis git pull
+sudo -u reshis npm ci && sudo -u reshis npm run build && sudo -u reshis npm prune --omit=dev
+sudo systemctl restart reshis-avia
+```
+
+## 3. Другие PaaS
+
+На любой платформе со сборкой по Dockerfile настройки такие же, как в разделе 1: порт 3000,
+проверка работоспособности `/api/health` и `NODE_ENV=production`. Настройте `TRUST_PROXY` по адресу прокси платформы.
+Если платформа даёт постоянный диск, смонтируйте его в `/app/storage`.
+
+Без Docker (платформа сама собирает Node.js):
+- версия Node.js: 24 (минимум 22.13);
+- команда сборки: `npm ci && npm run build`;
+- команда запуска: `npm start`;
+- порт берётся из `PORT`, его обычно задаёт платформа.
+
+## Замена прогноза на сервере
+
+- **VPS:** скопируйте файл поверх `data/seasonal_forecast.csv`, например
+  `scp Иванов_my_forecast.csv server:/opt/reshis-avia/app/data/seasonal_forecast.csv`.
+  Перезапуск не нужен: сервер подхватит новый файл при первом запросе после замены
+  (файлы проверяются не чаще раза в `DATA_CHECK_INTERVAL_MS`, по умолчанию 2 секунды).
+  Можно положить файл рядом под своим именем и указать его в `FORECAST_PATH` в unit-файле; в этом случае выполните
+  `sudo systemctl daemon-reload && sudo systemctl restart reshis-avia`.
+- **Docker / Apps:** замените файл в `data/` в репозитории и запустите деплой заново.
+  Или смонтируйте свою папку с данными: `-v /srv/forecast:/app/data`.
+- **Без доступа к серверу:** войдите администратором, откройте экран «Данные» и загрузите CSV.
+  Сервис покажет, что изменится, и заменит файл после подтверждения. В контейнере без постоянного
+  тома такая замена действует до следующего деплоя.
+
+Если в новом файле ошибка, сервис останется на прошлой версии данных, а причина появится
+в `/api/health` и в жёлтой плашке в интерфейсе.
+
+## Проверка после деплоя
+
+1. `GET https://<домен>/api/health` → `"status":"ok"`, `"flights":155`.
+2. Откройте сайт, зарегистрируйтесь и проверьте расчёт: Москва → Сочи, 01.06.2026, цена 9 500 ₽.
+   Должно получиться: хотят купить 704,5, прогноз продаж 705, свободно 195 мест из 900.
+3. В DevTools → Application → Cookies у cookie `ra_session` стоят флаги HttpOnly и Secure (на HTTPS).
+4. Убедитесь, что аккаунт владельца имеет роль администратора и доступ к экрану «Данные». Для публичного сервиса создайте его при первом запуске через `INITIAL_ADMIN_EMAIL` и `INITIAL_ADMIN_PASSWORD`.
+5. Оставьте регистрацию открытой на время проверки, чтобы жюри могло самостоятельно создать аккаунт.
+
+## Права на папки в Docker
+
+Контейнер работает от пользователя `node`. Именованный том (`-v reshis-storage:/app/storage`) подходит без настройки.
+Если монтируете папку хоста (`-v /srv/reshis/storage:/app/storage`), дайте пользователю с UID 1000 право записи:
+`sudo chown -R 1000:1000 /srv/reshis/storage`. То же для папки с данными, если прогноз будут загружать через экран «Данные»:
+`-v /srv/reshis/data:/app/data` и `sudo chown -R 1000:1000 /srv/reshis/data`.
+
+## Резервная копия
+
+Аккаунты, сессии и история расчётов лежат в файле `storage/app.db` (и `app.db-wal`, если он есть). Копируйте его по расписанию:
+`sqlite3 storage/app.db ".backup backup-$(date +%F).db"`.
