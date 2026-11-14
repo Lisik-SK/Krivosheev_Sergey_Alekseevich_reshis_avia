@@ -67,6 +67,7 @@ const ru = {
   upload_empty: () => 'Файл пустой',
   upload_too_large: (p) => `Файл больше ${p.mb} МБ`,
   upload_write_failed: (p) => `Не удалось сохранить файл: ${p.reason}`,
+  restore_invalid: (p) => `Не удалось восстановить предыдущую версию: ${p.reason}`,
   download_not_found: () => 'Файл для скачивания не найден',
   download_read_failed: () => 'Не удалось прочитать файл для скачивания',
   // CSV
@@ -156,6 +157,7 @@ const en: Record<MessageKey, (p: Params) => string> = {
   upload_empty: () => 'The file is empty',
   upload_too_large: (p) => `The file is larger than ${p.mb} MB`,
   upload_write_failed: (p) => `Could not save the file: ${p.reason}`,
+  restore_invalid: (p) => `Could not restore the previous version: ${p.reason}`,
   download_not_found: () => 'The file to download was not found',
   download_read_failed: () => 'Could not read the file to download',
   line_prefix: (p) => `Line ${p.line}: `,

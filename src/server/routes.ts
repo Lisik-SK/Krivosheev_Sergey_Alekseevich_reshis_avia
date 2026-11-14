@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { normalizeDate, type FlightForecast, type RouteInfo } from '../shared/dataset.js';
@@ -11,8 +10,8 @@ import {
   profitCurve,
   resolveCityCode,
 } from '../shared/forecast.js';
-import { render, type Lang, type Localizable } from '../shared/messages.js';
-import { buildSnapshot, flightKey, toLoadError, type DatasetSnapshot } from './dataStore.js';
+import { LocalizedError, render, type Lang, type Localizable } from '../shared/messages.js';
+import { buildSnapshot, flightKey, toLoadError, validateDataFile, type DatasetSnapshot } from './dataStore.js';
 import { HttpError, L, SESSION_COOKIE, clearSessionCookie, setSessionCookie } from './http.js';
 
 export const PRICE_LIMIT = 1_000_000;
@@ -482,8 +481,8 @@ export async function registerApiRoutes(app: FastifyInstance) {
     return {
       data: dataInfo(app, req.lang, true),
       backups: {
-        forecast: fs.existsSync(`${app.data.forecastPath}.bak`),
-        routes: fs.existsSync(`${app.data.routesPath}.bak`),
+        forecast: app.data.hasBackup('forecast'),
+        routes: app.data.hasBackup('routes'),
       },
       uploadMaxMb: app.config.uploadMaxMb,
     };
@@ -495,7 +494,7 @@ export async function registerApiRoutes(app: FastifyInstance) {
     const { kind } = req.params;
     if (kind !== 'forecast' && kind !== 'routes') throw new HttpError(404, 'api_not_found');
 
-    let version: ReturnType<typeof app.data.readFileVersion>;
+    let version: Awaited<ReturnType<typeof app.data.downloadFile>>;
     try {
       version = await app.data.downloadFile(kind);
     } catch (err) {
@@ -567,17 +566,30 @@ export async function registerApiRoutes(app: FastifyInstance) {
     },
   );
 
+  /**
+   * Проверяет и восстанавливает резервный CSV по обязательному типу из запроса администратора.
+   * Возвращает новое состояние данных; при неверном типе — 400, без входа — 401, без прав — 403,
+   * при отсутствии копии — 404, при ошибке разбора — 422.
+   * Копия проверяется до записи; при успехе заменяет текущий CSV по тем же правилам, что и загрузка.
+   * Остальные ошибки чтения или записи обрабатывает сервер.
+   */
   app.post('/api/admin/restore', async (req) => {
     requireAdmin(req);
     const body = (req.body ?? {}) as Body;
     const kind = body.kind === 'forecast' || body.kind === 'routes' ? body.kind : null;
     if (!kind) throw new HttpError(400, 'upload_kind');
-    let backup: ReturnType<typeof app.data.readFileVersion>;
+    let backup: ReturnType<typeof app.data.readBackup>;
     try {
-      backup = app.data.readFileVersion(kind, true);
+      backup = app.data.readBackup(kind);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new HttpError(404, 'not_found');
       throw err;
+    }
+    try {
+      validateDataFile(kind, backup.content);
+    } catch (err) {
+      if (!(err instanceof LocalizedError)) throw err;
+      throw new HttpError(422, 'restore_invalid', { reason: err.localize(req.lang) });
     }
     app.data.replaceFile(kind, backup.content, backup.name);
     return { ok: true, data: dataInfo(app, req.lang, true) };

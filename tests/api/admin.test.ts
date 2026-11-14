@@ -121,7 +121,7 @@ describe('GET /api/admin/download/:kind', () => {
   it.each([
     ['forecast', 'Прогноз (июнь).csv', 'Прогноз (июль).csv', CHANGED_FORECAST],
     ['routes', 'Маршруты (июнь).csv', 'Маршруты (июль).csv', ORIGINAL_ROUTES],
-  ] as const)('сохраняет имена версий CSV после перезапуска и отката (%s)', async (kind, firstName, secondName, content) => {
+  ] as const)('сохраняет разные имена одинаковых CSV при переносе и откате (%s)', async (kind, firstName, secondName, content) => {
     const files = setupDir();
     const firstApp = await adminApp({}, files);
     for (const filename of [firstName, secondName]) {
@@ -129,10 +129,26 @@ describe('GET /api/admin/download/:kind', () => {
       expect(upload.statusCode).toBe(200);
       expect(upload.json()).toMatchObject({ ok: true, applied: true, data: { source: { [kind]: { name: filename } } } });
     }
+    if (kind === 'forecast') {
+      // Воспроизводим метаданные старого формата, где имена записаны только по статистике файла.
+      for (const suffix of ['.names.json', '.bak.names.json']) {
+        const file = files.forecastPath + suffix;
+        const names = Object.entries(JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, string>);
+        fs.writeFileSync(file, JSON.stringify(Object.fromEntries(names.filter(([key]) => !key.startsWith('sha256:')))));
+      }
+      const status = await api(firstApp.app, 'GET', '/api/admin/data', firstApp.adminToken);
+      expect(status.json().backups.forecast).toBe(true);
+    }
     await firstApp.app.close();
     apps.splice(apps.indexOf(firstApp.app), 1);
 
-    const { app, adminToken } = await adminApp({}, files);
+    const moved = setupDir();
+    for (const type of ['forecastPath', 'routesPath'] as const) {
+      for (const suffix of ['', '.names.json', '.bak', '.bak.names.json']) {
+        if (fs.existsSync(files[type] + suffix)) fs.copyFileSync(files[type] + suffix, moved[type] + suffix);
+      }
+    }
+    const { app, adminToken } = await adminApp({}, moved);
     const current = await api(app, 'GET', '/api/admin/data', adminToken);
     expect(current.statusCode).toBe(200);
     expect(current.json().data.source[kind].name).toBe(secondName);
@@ -179,6 +195,50 @@ describe('GET /api/admin/download/:kind', () => {
     const previous = await api(app, 'GET', '/api/admin/download/forecast', adminToken);
     expect(previous.headers['content-disposition']).toContain('filename="previous.csv"');
     expect(previous.rawPayload).toEqual(Buffer.from(ORIGINAL_FORECAST));
+  });
+
+  it.each([
+    ['forecast', 'forecastPath', ORIGINAL_FORECAST, CHANGED_FORECAST],
+    ['routes', 'routesPath', ORIGINAL_ROUTES, `${ORIGINAL_ROUTES.trimEnd()}\n\n`],
+  ] as const)('повторный запрос не затирает резерв (%s)', async (kind, fileKey, previous, current) => {
+    const { app, adminToken, [fileKey]: file } = await adminApp();
+    for (const [filename, content] of [['previous.csv', previous], ['current.csv', current], ['current.csv', current]]) {
+      const res = await api(app, 'POST', '/api/admin/upload', adminToken, { kind, filename, content, apply: true });
+      expect(res.json()).toMatchObject({ ok: true, applied: true });
+    }
+    expect(fs.readFileSync(`${file}.bak`, 'utf8')).toBe(previous);
+    const restored = await api(app, 'POST', '/api/admin/restore', adminToken, { kind });
+    expect(restored.json()).toMatchObject({ ok: true, data: { source: { [kind]: { name: 'previous.csv' } } } });
+    expect(fs.readFileSync(file, 'utf8')).toBe(previous);
+    expect(fs.readFileSync(`${file}.bak`, 'utf8')).toBe(current);
+  });
+
+  it('после перезапуска завершает запись резерва для уже опубликованного CSV', async () => {
+    const files = setupDir();
+    const firstApp = await adminApp({}, files);
+    const rename = fs.renameSync;
+    const failure = vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      if (to === `${files.forecastPath}.bak`) throw new Error('Сбой записи резерва после публикации');
+      rename(from, to);
+    });
+    try {
+      const res = await api(firstApp.app, 'POST', '/api/admin/upload', firstApp.adminToken, {
+        kind: 'forecast', filename: 'current.csv', content: CHANGED_FORECAST, apply: true,
+      });
+      expect(res.json()).toMatchObject({ ok: true, applied: true });
+      expect(fs.readFileSync(files.forecastPath, 'utf8')).toBe(CHANGED_FORECAST);
+    } finally {
+      failure.mockRestore();
+    }
+    await firstApp.app.close();
+    apps.splice(apps.indexOf(firstApp.app), 1);
+
+    const { app, adminToken } = await adminApp({}, files);
+    const status = await api(app, 'GET', '/api/admin/data', adminToken);
+    expect(status.json()).toMatchObject({ backups: { forecast: true }, data: { source: { forecast: { name: 'current.csv' } } } });
+    const restored = await api(app, 'POST', '/api/admin/restore', adminToken, { kind: 'forecast' });
+    expect(restored.json()).toMatchObject({ ok: true, data: { source: { forecast: { name: 'seasonal_forecast.csv' } } } });
+    expect(fs.readFileSync(files.forecastPath, 'utf8')).toBe(ORIGINAL_FORECAST);
   });
 
   it('returns 404 for an unknown kind or a missing CSV', async () => {
@@ -502,5 +562,17 @@ describe('admin recovery when no data is loaded', () => {
     const res = await api(ctx.app, 'POST', '/api/admin/restore', ctx.adminToken, { kind: 'forecast' });
     expect(res.json()).toMatchObject({ ok: true, data: { ok: true, error: null } });
     expect((await forecast(ctx.app, ctx.userToken, AER)).json().median.wants).toBe(704.5);
+    expect(fs.readFileSync(`${files.forecastPath}.bak`, 'utf8')).toBe(ORIGINAL_FORECAST);
+  });
+
+  it.each([
+    ['forecast', 'forecastPath', ORIGINAL_FORECAST],
+    ['routes', 'routesPath', ORIGINAL_ROUTES],
+  ] as const)('не восстанавливает повреждённый резерв (%s)', async (kind, fileKey, original) => {
+    const { app, adminToken, [fileKey]: file } = await adminApp();
+    fs.writeFileSync(`${file}.bak`, 'garbage');
+    const res = await api(app, 'POST', '/api/admin/restore', adminToken, { kind });
+    expect(res.statusCode).toBe(422);
+    expect(fs.readFileSync(file, 'utf8')).toBe(original);
   });
 });

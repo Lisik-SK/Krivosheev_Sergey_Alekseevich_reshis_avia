@@ -32,7 +32,12 @@
 | Запуск | `npm start` |
 | Проверка, что сервис жив | `curl http://127.0.0.1:3000/api/health` |
 | Сборка Docker-образа | `docker build -t reshis-avia .` |
-| Запуск контейнера | `docker run -d -p 3000:3000 -v reshis-storage:/app/storage --name reshis-avia reshis-avia` |
+| Запуск контейнера | `docker run -d -p 3000:3000 -v reshis-storage:/app/storage -v reshis-data:/app/data --name reshis-avia reshis-avia` |
+
+Том `reshis-data` сохраняет текущие CSV, предыдущие версии и их имена при пересоздании контейнера.
+При переносе с контейнера без этого тома откройте экран «Данные» на обновлённом исходном
+сервере и проверьте журнал на ошибки записи резерва и обновления имён. Затем остановите
+приложение и скопируйте каталог `/app/data` целиком.
 
 `npm start` запускает `dist/node/server/index.js` с флагом `--env-file-if-exists=.env`: файл `.env` подхватывается, если он есть.
 Переменные окружения, заданные хостингом, имеют приоритет над значениями из `.env`.

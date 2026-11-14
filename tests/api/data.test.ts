@@ -331,13 +331,13 @@ describe('DataStore check interval', () => {
     const store = new DataStore(forecastPath, routesPath, 0);
     writeAndBump(routesPath, ORIGINAL_ROUTES.replace('9000,4200,0.141,', '9000,4200,0.282,'), 10);
 
-    const realRead = fs.readFileSync;
-    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
-      if (String(args[0]) === routesPath) {
+    const realOpen = fs.openSync;
+    const spy = vi.spyOn(fs, 'openSync').mockImplementation((...args) => {
+      if (args[0] === routesPath) {
         throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
       }
-      return realRead(...args);
-    }) as typeof fs.readFileSync);
+      return realOpen(...args);
+    });
     try {
       const st = store.status();
       expect(st.error!.text('ru')).toBe(msg('ru', 'file_read_error', { what: 'what_routes', file: routesPath, code: 'EBUSY' }));
