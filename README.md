@@ -1,9 +1,4 @@
-# Решись Авиа
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="src/client/public/favicon-dark.svg">
-  <img src="src/client/public/favicon.svg" alt="Логотип Решись Авиа" width="96" height="96">
-</picture>
+# Решись Авиа <picture><source media="(prefers-color-scheme: dark)" srcset="src/client/public/favicon-dark.svg"><img src="src/client/public/favicon.svg" alt="Логотип Решись Авиа" width="48" height="48" align="absmiddle"></picture>
 
 Решись Авиа — веб-приложение для прогноза продаж авиабилетов. Менеджер выбирает города, дату и цену билета, а приложение показывает ожидаемый спрос, загрузку самолёта, выручку и риск того, что желающих окажется больше, чем мест.
 
@@ -121,4 +116,6 @@ npm run forecast -- MOW AER 2026-06-01 9500 --chart
 | [`tests/`](tests/) | Модульные, API- и браузерные тесты |
 | [`deploy/`](deploy/) | Конфигурация запуска на хостинге |
 
-<img src="docs/images/steve-galaxy.png" alt="Стив в космосе. Когда сайт работает великолепно" width="400">
+<p align="center">
+  <img src="docs/images/steve-galaxy.png" alt="Стив в космосе. Когда сайт работает великолепно" width="400">
+</p>
