@@ -1017,6 +1017,18 @@ input[type='date']:enabled:not([readonly]) {
   height: auto;
   overflow: visible;
 }
+@media (hover: none) and (pointer: coarse) {
+  .chart--demand {
+    /* Касания столбцов сохраняют прокрутку и масштабирование двумя пальцами. */
+    touch-action: manipulation;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .chart--demand .seats-line {
+    pointer-events: none;
+  }
+}
 .chart text {
   font-family: var(--font-sans);
   fill: var(--ink-3);
@@ -1091,13 +1103,19 @@ input[type='date']:enabled:not([readonly]) {
   opacity: 0;
   transition: opacity 0.12s ease;
 }
-.chart .col:hover .hit-bg,
 .chart .col.is-active .hit-bg {
   opacity: 0.045;
 }
-:root[data-theme='dark'] .chart .col:hover .hit-bg,
 :root[data-theme='dark'] .chart .col.is-active .hit-bg {
   opacity: 0.08;
+}
+@media (any-hover: hover) {
+  .chart .col:hover .hit-bg {
+    opacity: 0.045;
+  }
+  :root[data-theme='dark'] .chart .col:hover .hit-bg {
+    opacity: 0.08;
+  }
 }
 .chart .hit-ring {
   fill: none;

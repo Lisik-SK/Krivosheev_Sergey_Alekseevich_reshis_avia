@@ -7,6 +7,7 @@
  * Медиана подписана и совпадает с числом «хотят купить» из простого прогноза.
  */
 import type { ScenarioResult } from '../shared/forecast';
+import { bindChartTap } from './chart-tap';
 import { h, s, clear, observeWidth } from './dom';
 import { fmtInt, fmtNum, fmtPrice, quantileLabel } from './format';
 import { t } from './i18n';
@@ -45,17 +46,40 @@ function topRoundedRect(x: number, y: number, w: number, hgt: number, r: number)
   ].join(' ');
 }
 
+/**
+ * Отображает распределение спроса и подсказку выбранного сценария.
+ * Владеет узлами графика, обработчиками ввода и наблюдателем ширины.
+ * Владелец добавляет root в DOM, передаёт данные через update и вызывает destroy при удалении.
+ */
 export class DemandChart {
   readonly root: HTMLDivElement;
   private readonly tooltip: HTMLDivElement;
   private data: ChartData | null = null;
   private width = 720;
   private activeIndex: number | null = null;
+  private isTouchActive = false;
+  private readonly stopTrackingTouch: () => void;
   private readonly stopObserving: () => void;
 
+  /**
+   * Создаёт пустой график и подключает закрытие подсказки касанием снаружи
+   * и перерисовку при изменении ширины контейнера.
+   * @remarks Аргументов нет. Требуется загруженный DOM. Подписки и наблюдатель
+   * принадлежат экземпляру, их освобождает destroy. Ошибки DOM не перехватываются.
+   */
   constructor() {
     this.tooltip = h('div', { class: 'tooltip', role: 'presentation', hidden: true });
-    this.root = h('div', { class: 'chart', 'data-testid': 'demand-chart' });
+    this.root = h('div', { class: 'chart chart--demand', 'data-testid': 'demand-chart' });
+    this.stopTrackingTouch = bindChartTap(
+      this.root,
+      (hit) => {
+        const index = this.cols.findIndex((col) => col.contains(hit));
+        if (index !== -1) this.toggleTouchTooltip(index);
+      },
+      () => {
+        if (this.isTouchActive) this.activate(null);
+      },
+    );
     this.stopObserving = observeWidth(this.root, (width) => {
       if (width > 0 && Math.abs(width - this.width) > 1) {
         this.width = width;
@@ -75,10 +99,23 @@ export class DemandChart {
     this.render();
   }
 
-  destroy() {
+  /**
+   * Освобождает подписки на касания и наблюдатель ширины графика.
+   * @returns void. Повторный вызов допустим. Узел графика удаляет владелец.
+   * @remarks Аргументов нет. Ошибки освобождения ресурсов не перехватываются.
+   */
+  destroy(): void {
+    this.stopTrackingTouch();
     this.stopObserving();
   }
 
+  /**
+   * Перестраивает SVG из текущих данных и ширины, связывает столбцы с вводом
+   * и восстанавливает активный сценарий, если он ещё существует.
+   * @returns void. При отсутствии данных очищает контейнер.
+   * @remarks Аргументов нет. Заменяет дочерние узлы контейнера и геометрию графика.
+   * Слушатели столбцов принадлежат новым узлам. Ошибки построения не перехватываются.
+   */
   private render() {
     const d = this.data;
     clear(this.root);
@@ -174,16 +211,22 @@ export class DemandChart {
         'aria-label': this.describe(sc, d.seats),
         'data-q': sc.q,
       });
-      hit.addEventListener('pointerenter', () => this.activate(i));
-      hit.addEventListener('pointermove', () => this.activate(i));
-      hit.addEventListener('pointerleave', () => this.activate(null));
+      hit.addEventListener('pointerenter', (event) => {
+        if (event.pointerType !== 'touch') this.activate(i);
+      });
+      hit.addEventListener('pointermove', (event) => {
+        if (event.pointerType !== 'touch') this.activate(i);
+      });
+      hit.addEventListener('pointerleave', (event) => {
+        if (event.pointerType !== 'touch' && !this.isTouchActive) this.activate(null);
+      });
       hit.addEventListener('focus', () => {
         g.classList.add('is-focus');
         this.activate(i);
       });
       hit.addEventListener('blur', () => {
         g.classList.remove('is-focus');
-        this.activate(null);
+        if (!this.isTouchActive) this.activate(null);
       });
       hit.addEventListener('keydown', (e) => {
         const ke = e as KeyboardEvent;
@@ -218,7 +261,7 @@ export class DemandChart {
     this.root.dataset.cols = String(n);
     this.cols = cols;
     this.geom = { m, band, yMax };
-    if (this.activeIndex !== null) this.activate(this.activeIndex);
+    if (this.activeIndex !== null) this.activate(this.activeIndex, this.isTouchActive);
   }
 
   private cols: SVGGElement[] = [];
@@ -232,15 +275,35 @@ export class DemandChart {
     return text + '.';
   }
 
-  private activate(i: number | null) {
-    this.activeIndex = i;
-    this.cols.forEach((c, idx) => c.classList.toggle('is-active', idx === i));
+  /**
+   * Открывает подсказку касанием столбца и закрывает её повторным касанием того же столбца.
+   * @param index Обязательный целочисленный индекс существующего сценария от нуля.
+   * @returns void. Обновляет выбранный сценарий, подсветку и подсказку через activate.
+   * @remarks Ожидает построенный график. Ошибки отрисовки подсказки не перехватываются.
+   */
+  private toggleTouchTooltip(index: number): void {
+    const isSameColumn = this.isTouchActive && this.activeIndex === index;
+    this.activate(isSameColumn ? null : index, true);
+  }
+
+  /**
+   * Обновляет подсветку столбца и показывает его подсказку в пределах графика.
+   * @param i Индекс сценария от нуля или null для закрытия подсказки.
+   * @param fromTouch Флаг выбора касанием. По умолчанию false для мыши и фокуса.
+   * @returns void. При отсутствии сценария или геометрии скрывает подсказку.
+   * @remarks Меняет состояние графика, классы столбцов, содержимое и положение
+   * подсказки. Использует построенный SVG для измерений. Ошибки DOM не перехватываются.
+   */
+  private activate(i: number | null, fromTouch = false): void {
     const d = this.data;
-    if (i === null || !d || !this.geom) {
+    const sc = i === null ? undefined : d?.scenarios[i];
+    this.activeIndex = sc ? i : null;
+    this.isTouchActive = this.activeIndex !== null && fromTouch;
+    this.cols.forEach((c, idx) => c.classList.toggle('is-active', idx === this.activeIndex));
+    if (i === null || !sc || !d || !this.geom) {
       this.tooltip.hidden = true;
       return;
     }
-    const sc = d.scenarios[i]!;
     const { m, band, yMax } = this.geom;
     const svg = this.root.querySelector('svg');
     const scale = svg ? svg.getBoundingClientRect().width / Math.max(320, this.width) : 1;

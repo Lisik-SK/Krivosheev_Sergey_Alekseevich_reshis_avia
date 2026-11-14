@@ -21,19 +21,22 @@ async function tapAt(target: Locator, fx = 0.5, fy = 0.5) {
 }
 
 test.describe('Касания: графики и календарь', () => {
-  test('касание столбца графика показывает подсказку, и она не исчезает сразу', async ({ page }) => {
+  test('касания открывают, переключают и закрывают подсказку распределения спроса', async ({ page }) => {
     await openApp(page, Q);
     const chart = page.getByTestId('demand-chart');
     const tooltip = chart.locator('.tooltip');
+    const median = chart.locator('.hit[data-q="0.5"]');
+    const p90 = chart.locator('.hit[data-q="0.9"]');
+    await expect(tooltip).toBeHidden();
     // Касаемся нижней части столбца, подальше от пунктира мест
-    await tapAt(chart.locator('.hit').nth(4), 0.5, 0.92);
+    await tapAt(median, 0.5, 0.92);
     await expect(tooltip).toBeVisible();
     await page.waitForTimeout(800);
     await expect(tooltip, 'после касания подсказка должна оставаться на экране').toBeVisible();
     expect(norm(await tooltip.textContent())).toContain('P50');
 
     // Касание другого столбца переключает подсказку
-    await tapAt(chart.locator('.hit').nth(8), 0.5, 0.92);
+    await tapAt(p90, 0.5, 0.92);
     await expect(tooltip).toContainText('P90');
 
     // Подсказка целиком на экране
@@ -42,9 +45,50 @@ test.describe('Касания: графики и календарь', () => {
     expect(tb.x).toBeGreaterThanOrEqual(0);
     expect(tb.x + tb.width).toBeLessThanOrEqual(vw + 1);
 
+    // Повторное касание того же столбца закрывает подсказку и убирает подсветку.
+    await tapAt(p90, 0.5, 0.92);
+    await expect(tooltip).toBeHidden();
+    await expect(chart.locator('.col.is-active')).toHaveCount(0);
+    await expect(chart).toHaveCSS('user-select', 'none');
+
+    // Пунктир вместимости пропускает касание к столбцу под ним.
+    const seatsLine = chart.locator('.seats-line');
+    await expect(seatsLine).toHaveCSS('pointer-events', 'none');
+    const medianBox = (await median.boundingBox())!;
+    const lineBox = (await seatsLine.boundingBox())!;
+    await page.touchscreen.tap(medianBox.x + medianBox.width / 2, lineBox.y);
+    await expect(tooltip).toContainText('P50');
+
     // Касание вне графика убирает подсказку
     await page.locator('h1').first().tap();
     await expect(tooltip).toBeHidden();
+  });
+
+  test('два пальца на разных столбцах не переключают подсказку', async ({ page }) => {
+    await openApp(page, Q);
+    const chart = page.getByTestId('demand-chart');
+    const hits = chart.locator('.hit');
+    await hits.nth(4).scrollIntoViewIfNeeded();
+    // Второй палец отпускается первым, без движения обоих пальцев.
+    // Имитируем данные событий: WebKit в Playwright не поддерживает new Touch.
+    await hits.evaluateAll((columns) => {
+      const firstColumn = columns[4]!;
+      const secondColumn = columns[5]!;
+      const box = firstColumn.getBoundingClientRect();
+      const first = { identifier: 1, target: firstColumn, clientX: box.x + box.width / 2, clientY: box.y + box.height * 0.92 };
+      const second = { identifier: 2, target: secondColumn };
+      for (const phase of [
+        { type: 'touchstart', changed: first, count: 1 },
+        { type: 'touchstart', changed: second, count: 2 },
+        { type: 'touchend', changed: second, count: 1 },
+        { type: 'touchend', changed: first, count: 0 },
+      ]) {
+        const event = new Event(phase.type, { bubbles: true, cancelable: true });
+        Object.assign(event, { touches: { length: phase.count }, changedTouches: { item: () => phase.changed } });
+        phase.changed.target.dispatchEvent(event);
+      }
+    });
+    await expect(chart.locator('.tooltip')).toBeHidden();
   });
 
   test('касание кривой дохода ставит цену и пересчитывает', async ({ page }) => {
