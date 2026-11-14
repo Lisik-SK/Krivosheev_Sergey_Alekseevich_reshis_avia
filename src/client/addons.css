@@ -839,14 +839,15 @@ body.has-drawer {
 }
 @media (max-width: 860px) {
   .topbar__inner {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: max-content 1fr repeat(3, max-content) minmax(40px, max-content) max-content;
     height: auto;
     padding-top: 10px;
     padding-bottom: 10px;
   }
-  .nav {
+  .topbar__inner .nav {
     order: 10;
-    width: 100%;
+    grid-column: 1 / -1;
     margin-left: 0;
   }
   .hide-sm {
@@ -857,6 +858,25 @@ body.has-drawer {
   }
 }
 @media (max-width: 640px) {
+  /* При нехватке места сжимается только название, а навигация занимает свою строку. */
+  .topbar__inner {
+    grid-template-columns: minmax(0, 1fr) repeat(4, max-content);
+  }
+  .topbar__inner .brand {
+    min-width: 0;
+    gap: 6px;
+  }
+  .topbar__inner .brand__name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .topbar__spacer {
+    display: none;
+  }
+  .topbar__inner > .btn--sm {
+    width: 36px;
+    padding-inline: 0;
+  }
   .board th,
   .board td {
     padding: 10px;

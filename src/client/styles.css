@@ -346,6 +346,8 @@ a[href] {
   place-items: center;
   width: 36px;
   height: 36px;
+  /* В WebKit стандартные отступы кнопки несимметричны по вертикали. */
+  padding: 0;
   border-radius: var(--r-sm);
   border: 1px solid var(--line);
   background: var(--surface);
@@ -1313,8 +1315,8 @@ input[type='date']:enabled:not([readonly]) {
     font-size: 14px;
   }
   .topbar__inner {
-    padding: 0 16px;
-    gap: 10px;
+    padding-inline: 12px;
+    gap: 6px;
   }
   .brand__sub,
   .user-chip__name {
