@@ -1022,11 +1022,34 @@ export async function renderCalculator(ctx: AppCtx, setMain: (main: HTMLElement)
     baseButton.addEventListener('click', () => applyPresetPrice(input, slider, currentRoute()?.basePrice));
     modelButton.addEventListener('click', () => applyPresetPrice(input, slider, selectedModelPrice()));
   }
-  compareToggle.addEventListener('change', () => {
+  /**
+   * Активирует флажок сравнения по Enter через стандартное событие click.
+   * @param event Обязательное событие KeyboardEvent на флажке. Пробел и остальные клавиши обрабатывает браузер.
+   * @returns void. Для Enter отменяет стандартное действие формы. Повторы при удержании игнорирует.
+   * @remarks Нажатие Enter меняет состояние доступного флажка и вызывает updateComparison
+   * через событие change. Ошибки вызовов DOM не перехватываются.
+   */
+  function activateCompareOnEnter(event: KeyboardEvent): void {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (!event.repeat) compareToggle.click();
+  }
+
+  /**
+   * Синхронизирует поля после изменения флажка. Аргументов нет, возвращает void.
+   * Сначала обновляет видимость и подписи, при включении фокусирует поле второй цены,
+   * затем сохраняет параметры в URL и состояние сравнения, отменяет текущий запрос и заменяет
+   * таймер пересчёта. Пересчёт может отправить сетевые запросы. Ошибки DOM, History API и таймера
+   * прерывают синхронные шаги и передаются браузеру. Отката нет.
+   */
+  function updateComparison(): void {
     syncCompareControls();
     if (compareToggle.checked) priceBInput.focus();
     schedule(0);
-  });
+  }
+
+  compareToggle.addEventListener('keydown', activateCompareOnEnter);
+  compareToggle.addEventListener('change', updateComparison);
   form.addEventListener('submit', (e) => e.preventDefault());
   document.addEventListener(
     'visibilitychange',

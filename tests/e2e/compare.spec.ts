@@ -23,6 +23,40 @@ async function compareRows(page: Page): Promise<string[][]> {
 }
 
 test.describe('Сравнение двух цен', () => {
+  /**
+   * Проверяет фокус через Tab и Shift+Tab и оба состояния сравнения через Enter и пробел.
+   * @param page Обязательная страница Playwright, где создаётся тестовая сессия и открывается калькулятор.
+   * @returns Promise<void> после завершения обеих проверок.
+   * @throws Ошибки подготовки страницы, действий Playwright или невыполненных проверок.
+   * @remarks Нажатия меняют видимость второй цены и фокус. После каждой пары нажатий сравнение выключено.
+   */
+  test('переключатель доступен через Tab, Enter и пробел', async ({ page }) => {
+    await openApp(page);
+    const toggle = page.getByRole('checkbox', { name: 'Сравнить с другой ценой' });
+    const comparisonPrice = page.getByTestId('price-b');
+
+    await page.getByTestId('model-price-1').focus();
+    await page.keyboard.press('Tab');
+    await expect(toggle).toBeFocused();
+    await expect(page.locator('.switch__track')).toHaveCSS('outline-style', 'solid');
+    await expect(toggle).not.toBeChecked();
+    await expect(comparisonPrice).toBeHidden();
+
+    for (const key of ['Enter', 'Space']) {
+      await page.keyboard.press(key);
+      await expect(toggle).toBeChecked();
+      await expect(comparisonPrice).toBeVisible();
+      await expect(comparisonPrice).toBeFocused();
+
+      await page.keyboard.press('Shift+Tab');
+      await expect(toggle).toBeFocused();
+      await page.keyboard.press(key);
+      await expect(toggle).not.toBeChecked();
+      await expect(comparisonPrice).toBeHidden();
+      await expect(toggle).toBeFocused();
+    }
+  });
+
   test('каждая кнопка «база» выставляет тариф текущего маршрута только для своей цены', async ({ page }) => {
     const [code, date, base, first, second] = ['MOW-KGD', '2026-06-12', 7500, 8100, 9600] as const;
     await openApp(page, `?from=MOW&to=KGD&date=${date}&price=${first}&b=${second}`);
