@@ -1,6 +1,7 @@
 /** Проверяет порядок ввода, сужение вариантов и полный сброс формы «Рейс». */
 import type { Page } from '@playwright/test';
-import { chooseOption, expect, isForecast, registerViaApi, settled, test, waitForecast } from './support/fixtures';
+import { chooseOption, expect, isForecast, registerViaApi, settled, waitForecast } from './support/fixtures';
+import { testWithReturnFlights as test } from './support/return-flights';
 
 /**
  * Открывает пустой калькулятор в новой авторизованной сессии.

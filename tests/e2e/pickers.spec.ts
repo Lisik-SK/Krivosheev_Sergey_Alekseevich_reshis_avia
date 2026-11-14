@@ -6,7 +6,8 @@
 import AxeBuilder from '@axe-core/playwright';
 import type { Locator, Page } from '@playwright/test';
 import type { Meta } from '../../src/client/api';
-import { test, expect, openApp, chooseOption, settled, waitForecast } from './support/fixtures';
+import { expect, openApp, chooseOption, settled, waitForecast } from './support/fixtures';
+import { testWithReturnFlights as test } from './support/return-flights';
 
 /**
  * Проверяет, что открытая панель помещается в видимой области страницы.
