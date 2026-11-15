@@ -463,8 +463,14 @@ test.describe('Экран «Данные»: справочник маршрут�
 
   test('новый маршрут без прогноза недоступен в списке и считается после импорта прогноза', async ({ page }) => {
     await openAdmin(page);
-    const routesWithoutReverse = ORIGINAL.routes.replace(/^AER-MOW,[^\r\n]*\r?\n/gm, '');
-    const forecastWithoutReverse = ORIGINAL.forecast.replace(/^AER-MOW,[^\r\n]*\r?\n/gm, '');
+    const routeToPetersburg = ORIGINAL.routes.split(/\r?\n/).find((row) => row.startsWith('MOW-LED,'));
+    const flightToPetersburg = ORIGINAL.forecast.split(/\r?\n/).find((row) => row.startsWith('MOW-LED,2026-06-01,'));
+    expect(routeToPetersburg).toBeDefined();
+    expect(flightToPetersburg).toBeDefined();
+    const returnRoute = routeToPetersburg!.replace('MOW-LED,Москва — Санкт-Петербург', 'LED-MOW,Санкт-Петербург — Москва');
+    const returnFlight = flightToPetersburg!.replace(/^MOW-LED,/, 'LED-MOW,');
+    const routesWithoutReverse = `${ORIGINAL.routes.replace(/^(AER-MOW|LED-MOW),[^\r\n]*\r?\n/gm, '').trimEnd()}\n${returnRoute}\n`;
+    const forecastWithoutReverse = `${ORIGINAL.forecast.replace(/^(AER-MOW|LED-MOW),[^\r\n]*\r?\n/gm, '').trimEnd()}\n${returnFlight}\n`;
     await uploadApply(api, 'routes', routesWithoutReverse);
     await uploadApply(api, 'forecast', forecastWithoutReverse);
     await page.getByLabel('Справочник маршрутов', { exact: true }).check();

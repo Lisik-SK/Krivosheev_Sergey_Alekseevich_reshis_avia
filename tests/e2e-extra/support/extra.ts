@@ -47,8 +47,11 @@ export async function healthStatus(api: APIRequestContext): Promise<string> {
 }
 
 /**
- * Вернуть исходные файлы данных прямо на диск (без загрузки через API — у загрузки
- * есть лимит 30 запросов в минуту) и дождаться, пока сервер их перечитает.
+ * Восстанавливает два тестовых CSV атомарной заменой и ждёт их перечитывания.
+ * @param api Обязательный авторизованный контекст локального API.
+ * @returns Promise<void> после восстановления или сразу, если байты не менялись.
+ * @remarks Синхронно заменяет изменённые тестовые файлы. Ошибки диска распространяются,
+ * Playwright помечает тест ошибкой, если сервер не перечитал данные за 15 секунд.
  */
 export async function restoreDataOnDisk(api: APIRequestContext) {
   let changed = false;
@@ -62,15 +65,17 @@ export async function restoreDataOnDisk(api: APIRequestContext) {
     const tmp = `${target}.extra-tmp`;
     fs.writeFileSync(tmp, content, 'utf8');
     fs.renameSync(tmp, target);
-    // Время изменения сдвигаем вперёд: сервер замечает файл по размеру и mtime.
-    const t = Date.now() / 1000 + 2;
-    fs.utimesSync(target, t, t);
     changed = true;
   }
   if (!changed) return;
+  /**
+   * Возвращает ожидаемый размер и дату с той же точностью статистики, что сервер.
+   * @param name Обязательное имя CSV внутри каталога тестовых данных.
+   * @remarks Синхронно читает статистику. При недоступном файле передаёт ошибку тесту.
+   */
   const restoredFile = (name: string) => {
-    const { size, mtime } = fs.statSync(path.join(DATA_DIR, name));
-    return { size, modifiedAt: mtime.toISOString() };
+    const { size, mtime } = fs.statSync(path.join(DATA_DIR, name), { bigint: true });
+    return { size: Number(size), modifiedAt: mtime.toISOString() };
   };
   await expect
     .poll(async () => {
