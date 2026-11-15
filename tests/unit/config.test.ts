@@ -23,6 +23,7 @@ describe('loadConfig', () => {
       trustProxy: false,
       allowRegistration: true,
       uploadMaxMb: 5,
+      adminUploadRateLimitPerMinute: 30,
       logLevel: 'info',
       dataCheckIntervalMs: 2000,
       authRateLimitPerMinute: 10,
@@ -34,6 +35,13 @@ describe('loadConfig', () => {
     expect(loadConfig({ UPLOAD_MAX_MB: '' }).uploadMaxMb).toBe(5);
     expect(() => loadConfig({ UPLOAD_MAX_MB: '0' })).toThrow(/UPLOAD_MAX_MB/);
     expect(() => loadConfig({ UPLOAD_MAX_MB: '1.5' })).toThrow(/UPLOAD_MAX_MB/);
+  });
+
+  it('лимит загрузок CSV по умолчанию равен 30 и принимает положительное целое число', () => {
+    expect(loadConfig({ ADMIN_UPLOAD_RATE_LIMIT: '' }).adminUploadRateLimitPerMinute).toBe(30);
+    expect(loadConfig({ ADMIN_UPLOAD_RATE_LIMIT: '1000' }).adminUploadRateLimitPerMinute).toBe(1000);
+    expect(() => loadConfig({ ADMIN_UPLOAD_RATE_LIMIT: '0' })).toThrow(/ADMIN_UPLOAD_RATE_LIMIT/);
+    expect(() => loadConfig({ ADMIN_UPLOAD_RATE_LIMIT: '30.5' })).toThrow(/ADMIN_UPLOAD_RATE_LIMIT/);
   });
 
   it('NODE_ENV', () => {

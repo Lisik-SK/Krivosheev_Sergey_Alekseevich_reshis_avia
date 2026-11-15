@@ -549,7 +549,10 @@ export async function registerApiRoutes(app: FastifyInstance) {
 
   app.post(
     '/api/admin/upload',
-    { bodyLimit: app.config.uploadMaxMb * 1024 * 1024 * 2 + 4096, config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    {
+      bodyLimit: app.config.uploadMaxMb * 1024 * 1024 * 2 + 4096,
+      config: { rateLimit: { max: app.config.adminUploadRateLimitPerMinute, timeWindow: '1 minute' } },
+    },
     async (req) => {
       requireAdmin(req);
       const body = (req.body ?? {}) as Body;

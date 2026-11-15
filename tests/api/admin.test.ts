@@ -616,6 +616,19 @@ describe('admin recovery when no data is loaded', () => {
 });
 
 describe('подтверждение замены CSV при конкурентных запросах', () => {
+  it('ограничивает суммарное число предпросмотров и применений с одного IP', async () => {
+    const { app, adminToken, forecastPath } = await adminApp({ adminUploadRateLimitPerMinute: 1 });
+    const candidate = { kind: 'forecast', content: CHANGED_FORECAST };
+    const preview = await sendUpload(app, adminToken, candidate);
+    expect(preview.json().revision).toMatch(/^[0-9a-f]{64}$/);
+    const denied = await api(app, 'POST', '/api/admin/upload', adminToken, {
+      ...candidate, apply: true, expectedRevision: preview.json().revision,
+    });
+    expect(denied.statusCode).toBe(429);
+    expect(fs.readFileSync(forecastPath, 'utf8')).toBe(ORIGINAL_FORECAST);
+    expect(fs.existsSync(`${forecastPath}.bak`)).toBe(false);
+  });
+
   it.each([
     ['forecast', 'forecastPath', ORIGINAL_FORECAST, CHANGED_FORECAST],
     ['routes', 'routesPath', ORIGINAL_ROUTES, ORIGINAL_ROUTES.replace('9000,4200,0.141,', '9000,4200,0.282,')],

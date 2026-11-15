@@ -27,6 +27,8 @@ export interface AppConfig {
   allowRegistration: boolean;
   /** Максимальный размер загружаемого CSV, МБ. */
   uploadMaxMb: number;
+  /** Лимит запросов предпросмотра и применения CSV с одного IP за минуту. */
+  adminUploadRateLimitPerMinute: number;
   logLevel: string;
   /** Как часто (мс) сервер проверяет, не изменились ли CSV-файлы. */
   dataCheckIntervalMs: number;
@@ -78,6 +80,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     trustProxy: parseTrustProxy(env.TRUST_PROXY),
     allowRegistration: bool(env.ALLOW_REGISTRATION, true),
     uploadMaxMb: int(env.UPLOAD_MAX_MB, 5, 'UPLOAD_MAX_MB', 1),
+    adminUploadRateLimitPerMinute: int(env.ADMIN_UPLOAD_RATE_LIMIT, 30, 'ADMIN_UPLOAD_RATE_LIMIT', 1),
     logLevel: env.LOG_LEVEL?.trim() || (nodeEnv === 'test' ? 'silent' : 'info'),
     dataCheckIntervalMs: int(env.DATA_CHECK_INTERVAL_MS, 2000, 'DATA_CHECK_INTERVAL_MS'),
     authRateLimitPerMinute: int(env.AUTH_RATE_LIMIT, 10, 'AUTH_RATE_LIMIT', 1),

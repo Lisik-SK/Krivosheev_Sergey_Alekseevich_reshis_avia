@@ -41,6 +41,8 @@ export default defineConfig({
       STORAGE_DIR: STORAGE,
       DATA_DIR: DATA,
       AUTH_RATE_LIMIT: '1000',
+      // Все браузерные сценарии используют один локальный IP, включая подготовку CSV через API.
+      ADMIN_UPLOAD_RATE_LIMIT: '1000',
       INITIAL_ADMIN_EMAIL: ADMIN.email,
       INITIAL_ADMIN_PASSWORD: ADMIN.password,
       LOG_LEVEL: 'warn',
