@@ -1,4 +1,4 @@
-# Решись Авиа&nbsp;<picture><source media="(prefers-color-scheme: dark)" srcset="src/client/public/favicon-dark.svg"><img src="src/client/public/favicon.svg" alt="Логотип Решись Авиа" width="48" height="48" align="absmiddle"></picture>
+# Решись Авиа&nbsp;<img src="src/client/public/favicon.svg#gh-light-mode-only" alt="Логотип Решись Авиа" width="48" height="48" align="absmiddle"><img src="src/client/public/favicon-dark.svg#gh-dark-mode-only" alt="Логотип Решись Авиа" width="48" height="48" align="absmiddle">
 
 Решись Авиа — веб-приложение для прогноза продаж авиабилетов. Менеджер выбирает города, дату и цену билета, а приложение показывает ожидаемый спрос, загрузку самолёта, выручку и риск того, что желающих окажется больше, чем мест.
 
